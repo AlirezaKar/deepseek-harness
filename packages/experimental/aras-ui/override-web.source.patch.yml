@@ -1,0 +1,21 @@
+# Source overlay for overriding the default `dsh web` UI directly from source:
+#   pnpm dsh web --patch ./packages/experimental/aras-ui/override-web.source.patch.yml
+
+- id: web-runtime
+  disabled: true
+
+- id: harness-dev-context
+  disabled: true
+
+- id: modules
+  disabled: true
+
+- id: client-hmr
+  disabled: true
+
+- id: typert-loader
+  disabled: true
+
+- insert:
+    - id: aras-ui
+      name: './src/index.ts'

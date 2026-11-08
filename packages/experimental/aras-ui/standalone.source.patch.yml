@@ -1,0 +1,38 @@
+# Source overlay for launching Aras UI on 0.0.0.0:<port> (e.g. cloud sandboxes & container previews):
+#   pnpm dsh web --patch ./packages/experimental/aras-ui/standalone.source.patch.yml --no-open
+
+- id: webserver
+  disabled: true
+
+- id: web-runtime
+  disabled: true
+
+- id: harness-dev-context
+  disabled: true
+
+- id: modules
+  disabled: true
+
+- id: client-hmr
+  disabled: true
+
+- id: connection
+  disabled: true
+
+- id: open-in-app
+  disabled: true
+
+- id: directory-picker
+  disabled: true
+
+- id: typert-loader
+  disabled: true
+
+- insert:
+    - id: aras-ui
+      name: './src/index.ts'
+      config:
+        attachWebServer: false
+        host: '0.0.0.0'
+        port: 3080
+        printUrl: true

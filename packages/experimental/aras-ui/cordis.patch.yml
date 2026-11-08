@@ -1,0 +1,20 @@
+# Bundle patch for @deepseek-ai/dsh-aras-ui.
+# When applied over the `web` profile, disables the default React Web shell
+# runtime (`web-runtime`, `modules`, `client-hmr`, `harness-dev-context`) and
+# mounts the Aras Smart Assistant UI onto the shared webserver.
+
+- id: web-runtime
+  disabled: true
+
+- id: harness-dev-context
+  disabled: true
+
+- id: modules
+  disabled: true
+
+- id: client-hmr
+  disabled: true
+
+- insert:
+    - id: aras-ui
+      name: '@deepseek-ai/dsh-aras-ui'

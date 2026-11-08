@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Interface do assistente Aras",
+    "description": "Fornece a interface persa RTL do assistente Aras e a ponte de streaming HTTP sobre o harness."
+  }
+}
