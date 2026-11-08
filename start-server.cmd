@@ -147,19 +147,42 @@ for /f "delims=" %%p in ('call pnpm -v 2^>nul') do set "PNPM_VER=%%p"
 echo       pnpm %PNPM_VER% OK.
 
 rem ===========================================================================
-rem Step 4/4: Verify Dependencies & UI Build Artifacts
+rem Step 4/4: Verify Dependencies, LLM SDK Integrity & UI Readiness
 rem ===========================================================================
 echo [4/4] Checking workspace dependencies and %UI_MODE% UI readiness...
 if "%FORCE_INSTALL%"=="1" goto :run_install
 if not exist "node_modules\.modules.yaml" goto :run_install
 if not exist "node_modules\tsx\package.json" goto :run_install
 if /i "%UI_MODE%"=="aras" if not exist "packages\experimental\aras-ui\node_modules\@deepseek-ai\cordis\package.json" goto :run_install
+
+rem Verify @earendil-works/pi-ai and its runtime SDKs (openai, anthropic, google) are intact in .pnpm
+call :probe_llm_sdks
+if errorlevel 1 goto :repair_install
 goto :deps_ok
 
 :run_install
 echo       Installing workspace dependencies with pnpm install...
 call pnpm install
 if errorlevel 1 goto :err_install_failed
+call :probe_llm_sdks
+if errorlevel 1 goto :repair_install
+goto :deps_ok
+
+:repair_install
+echo       [WARN] Detected incomplete or corrupted LLM SDK package in node_modules\.pnpm ^(e.g. openai^).
+echo       Auto-repairing broken virtual-store entries...
+node -e "const fs=require('node:fs'),p=require('node:path'),s=p.resolve('node_modules/.pnpm');if(fs.existsSync(s)){for(const d of fs.readdirSync(s)){if(/^(openai@|@earendil-works\+pi-ai@|@anthropic-ai\+sdk@|@google\+genai@)/.test(d)){try{fs.rmSync(p.join(s,d),{recursive:true,force:true});}catch{}}}}"
+call pnpm install --prefer-offline
+call :probe_llm_sdks
+if not errorlevel 1 goto :repair_done
+echo       [WARN] Fast relink did not resolve SDK check ^(possible Windows MAX_PATH truncation^). Running forced short-path install...
+set "CI=true"
+call pnpm install --force --config.virtual-store-dir-max-length=40
+if errorlevel 1 goto :err_install_failed
+call :probe_llm_sdks
+if errorlevel 1 goto :err_install_failed
+:repair_done
+echo       LLM SDK packages repaired and verified.
 
 :deps_ok
 rem Ensure TypeScript workspace path aliases are up to date
@@ -173,7 +196,7 @@ goto :check_dsh
 if not exist "packages\experimental\aras-ui\src\index.ts" goto :err_missing_aras
 if not exist "packages\experimental\aras-ui\override-web.source.patch.yml" goto :err_missing_aras
 if not exist "packages\experimental\aras-ui\standalone.source.patch.yml" goto :err_missing_aras
-echo       Aras Smart Assistant plugin files verified.
+echo       Aras Smart Assistant plugin ^& LLM SDKs verified.
 goto :ready_to_start
 
 :check_dsh
@@ -194,10 +217,20 @@ echo       Build completed successfully.
 :ready_to_start
 if "%CHECK_ONLY%"=="1" goto :check_only_done
 
+rem Enable Node 24 persistent on-disk V8 & tsx compile cache for much faster warm startups
+if not defined NODE_COMPILE_CACHE (
+    if defined LOCALAPPDATA (
+        set "NODE_COMPILE_CACHE=%LOCALAPPDATA%\deepseek-harness\compile-cache"
+    ) else (
+        set "NODE_COMPILE_CACHE=%TEMP%\deepseek-harness-compile-cache"
+    )
+)
+
 echo.
 echo ======================================================================
 if /i "%UI_MODE%"=="aras" echo   Starting Aras Smart Assistant UI on http://%HOST%:%PORT%/
 if /i "%UI_MODE%"=="dsh"  echo   Starting DeepSeek Harness Default Web UI on http://%HOST%:%PORT%/
+echo   Compile cache : %NODE_COMPILE_CACHE%
 echo   Press Ctrl+C to stop the server.
 echo ======================================================================
 echo.
@@ -209,7 +242,7 @@ goto :launch_dsh
 set "BROWSER_HOST=%HOST%"
 if "%HOST%"=="0.0.0.0" set "BROWSER_HOST=127.0.0.1"
 if "%HOST%"=="::" set "BROWSER_HOST=127.0.0.1"
-if "%NO_OPEN%"=="0" start "" /b node -e "const http=require('node:http'),cp=require('node:child_process'),u='http://%BROWSER_HOST%:%PORT%/';let n=0;const t=setInterval(function(){if(++n>=75)return clearInterval(t);const r=http.get(u,function(res){if(res.statusCode===200){clearInterval(t);cp.exec('cmd /c start '+u);}res.resume();});r.on('error',function(){});},400);"
+if "%NO_OPEN%"=="0" start "" /b node -e "const http=require('node:http'),cp=require('node:child_process'),u='http://%BROWSER_HOST%:%PORT%/';let n=0;const t=setInterval(function(){if(++n>=150)return clearInterval(t);const r=http.get(u,function(res){if(res.statusCode===200){clearInterval(t);cp.exec('cmd /c start '+u);}res.resume();});r.on('error',function(){});},400);"
 
 rem Wildcard 0.0.0.0 / :: uses standalone HTTP mode because dsh-host-webserver rejects wildcard binds
 if "%HOST%"=="0.0.0.0" goto :launch_aras_standalone
@@ -232,6 +265,10 @@ if "%NO_OPEN%"=="1" set "DSH_OPEN_ARG=--no-open"
 node --import tsx/esm apps/cli/src/bin.ts web --host "%HOST%" --port "%PORT%" %DSH_OPEN_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"
 goto :finish
+
+:probe_llm_sdks
+node --input-type=module -e "import { createRequire } from 'node:module'; import { existsSync } from 'node:fs'; import { dirname, join, resolve } from 'node:path'; import { pathToFileURL } from 'node:url'; const r1 = createRequire(resolve('packages/llm/llm-pi-ai/package.json')); const piPkg = r1.resolve('@earendil-works/pi-ai/package.json'); const r2 = createRequire(piPkg); for (const pkg of ['openai', '@anthropic-ai/sdk', '@google/genai']) { const pj = r2.resolve(pkg + '/package.json'); if (!existsSync(pj)) process.exit(1); r2.resolve(pkg); } await import(pathToFileURL(join(dirname(piPkg), 'dist/api/openai-completions.js')).href);" >nul 2>&1
+exit /b %ERRORLEVEL%
 
 :check_only_done
 echo.

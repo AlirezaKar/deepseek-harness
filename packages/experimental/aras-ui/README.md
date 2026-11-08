@@ -56,13 +56,15 @@ From the repository root:
 pnpm dsh web --patch packages/experimental/aras-ui/override-web.source.patch.yml
 ```
 
-On Windows (`cmd.exe` / Explorer), you can also run [`start-server.cmd`](../../../start-server.cmd) from the repository root to verify Node.js (`>= 24.9.0`), `pnpm`, workspace dependencies, and UI build artifacts automatically and choose between **`aras`** and **`dsh`**:
+On Windows (`cmd.exe` / Explorer), you can also run [`start-server.cmd`](../../../start-server.cmd) from the repository root to verify Node.js (`>= 24.9.0`), `pnpm`, workspace dependencies, `@earendil-works/pi-ai` provider SDK integrity (`openai`, `@anthropic-ai/sdk`, `@google/genai` inside `node_modules/.pnpm`, auto-repairing partial Windows installs), and persistent `NODE_COMPILE_CACHE` bytecode/transpilation caching automatically, and choose between **`aras`** and **`dsh`**:
 
 ```bat
 start-server.cmd
 start-server.cmd aras --port 3080
 start-server.cmd dsh --port 3080
 ```
+
+`override-web.source.patch.yml`, `standalone.source.patch.yml`, and `cordis.patch.yml` also disable `hmr`, the Typert browser RPC stack, and the 70+ built-in React client UI plugins unused by Aras UI so source-mode startup avoids transpiling unused frontend packages while keeping all Harness core services, presets, orchestrator, and tools active.
 
 You can still pass standard `dsh web` flags such as `--port 3090` or `--no-open`:
 
