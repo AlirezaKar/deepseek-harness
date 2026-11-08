@@ -147,7 +147,7 @@ for /f "delims=" %%p in ('call pnpm -v 2^>nul') do set "PNPM_VER=%%p"
 echo       pnpm %PNPM_VER% OK.
 
 rem ===========================================================================
-rem Step 4/4: Verify Dependencies, LLM SDK Integrity & UI Readiness
+rem Step 4/4: Fast Filesystem Check (Only runs pnpm install when missing)
 rem ===========================================================================
 echo [4/4] Checking workspace dependencies and %UI_MODE% UI readiness...
 if "%FORCE_INSTALL%"=="1" goto :run_install
@@ -155,34 +155,27 @@ if not exist "node_modules\.modules.yaml" goto :run_install
 if not exist "node_modules\tsx\package.json" goto :run_install
 if /i "%UI_MODE%"=="aras" if not exist "packages\experimental\aras-ui\node_modules\@deepseek-ai\cordis\package.json" goto :run_install
 
-rem Verify @earendil-works/pi-ai and its runtime SDKs (openai, anthropic, google) are intact in .pnpm
+rem Instant filesystem check for @earendil-works/pi-ai & its LLM SDK files (no package manager call)
 call :probe_llm_sdks
 if errorlevel 1 goto :repair_install
+echo       Dependencies already installed ^(skipping pnpm install^).
 goto :deps_ok
 
 :run_install
-echo       Installing workspace dependencies with pnpm install...
-call pnpm install
+call :resolve_pnpm_args
+echo       Installing workspace dependencies ^(one-time setup^)...
+call pnpm install %PNPM_EXTRA_ARGS%
 if errorlevel 1 goto :err_install_failed
-call :probe_llm_sdks
-if errorlevel 1 goto :repair_install
 goto :deps_ok
 
 :repair_install
-echo       [WARN] Detected incomplete or corrupted LLM SDK package in node_modules\.pnpm ^(e.g. openai^).
-echo       Auto-repairing broken virtual-store entries...
-node -e "const fs=require('node:fs'),p=require('node:path'),s=p.resolve('node_modules/.pnpm');if(fs.existsSync(s)){for(const d of fs.readdirSync(s)){if(/^(openai@|@earendil-works\+pi-ai@|@anthropic-ai\+sdk@|@google\+genai@)/.test(d)){try{fs.rmSync(p.join(s,d),{recursive:true,force:true});}catch{}}}}"
-call pnpm install --prefer-offline
-call :probe_llm_sdks
-if not errorlevel 1 goto :repair_done
-echo       [WARN] Fast relink did not resolve SDK check ^(possible Windows MAX_PATH truncation^). Running forced short-path install...
-set "CI=true"
-call pnpm install --force --config.virtual-store-dir-max-length=40
+echo       [WARN] Missing files detected in LLM SDK folder ^(e.g. openai/index.mjs^).
+echo       Removing only incomplete SDK folders and restoring from local pnpm store...
+node -e "const fs=require('node:fs'),p=require('node:path'),s=p.resolve('node_modules/.pnpm');if(fs.existsSync(s)){for(const d of fs.readdirSync(s)){if(/^openai@/.test(d)&&(!fs.existsSync(p.join(s,d,'node_modules/openai/package.json'))||!fs.existsSync(p.join(s,d,'node_modules/openai/index.mjs')))){try{fs.rmSync(p.join(s,d),{recursive:true,force:true});}catch{}}if(/^@earendil-works\+pi-ai@/.test(d)&&!fs.existsSync(p.join(s,d,'node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js'))){try{fs.rmSync(p.join(s,d),{recursive:true,force:true});}catch{}}}}"
+call :resolve_pnpm_args
+call pnpm install %PNPM_EXTRA_ARGS%
 if errorlevel 1 goto :err_install_failed
-call :probe_llm_sdks
-if errorlevel 1 goto :err_install_failed
-:repair_done
-echo       LLM SDK packages repaired and verified.
+echo       LLM SDK files verified.
 
 :deps_ok
 rem Ensure TypeScript workspace path aliases are up to date
@@ -196,7 +189,7 @@ goto :check_dsh
 if not exist "packages\experimental\aras-ui\src\index.ts" goto :err_missing_aras
 if not exist "packages\experimental\aras-ui\override-web.source.patch.yml" goto :err_missing_aras
 if not exist "packages\experimental\aras-ui\standalone.source.patch.yml" goto :err_missing_aras
-echo       Aras Smart Assistant plugin ^& LLM SDKs verified.
+echo       Aras Smart Assistant plugin ^& LLM SDKs ready.
 goto :ready_to_start
 
 :check_dsh
@@ -225,12 +218,14 @@ if not defined NODE_COMPILE_CACHE (
         set "NODE_COMPILE_CACHE=%TEMP%\deepseek-harness-compile-cache"
     )
 )
+if not exist "%NODE_COMPILE_CACHE%" mkdir "%NODE_COMPILE_CACHE%" >nul 2>&1
 
 echo.
 echo ======================================================================
 if /i "%UI_MODE%"=="aras" echo   Starting Aras Smart Assistant UI on http://%HOST%:%PORT%/
 if /i "%UI_MODE%"=="dsh"  echo   Starting DeepSeek Harness Default Web UI on http://%HOST%:%PORT%/
 echo   Compile cache : %NODE_COMPILE_CACHE%
+echo   Booting TypeScript runtime ^(first run populates cache; next runs start much faster^)...
 echo   Press Ctrl+C to stop the server.
 echo ======================================================================
 echo.
@@ -267,8 +262,13 @@ set "EXIT_CODE=%ERRORLEVEL%"
 goto :finish
 
 :probe_llm_sdks
-node --input-type=module -e "import { createRequire } from 'node:module'; import { existsSync } from 'node:fs'; import { dirname, join, resolve } from 'node:path'; import { pathToFileURL } from 'node:url'; const r1 = createRequire(resolve('packages/llm/llm-pi-ai/package.json')); const piPkg = r1.resolve('@earendil-works/pi-ai/package.json'); const r2 = createRequire(piPkg); for (const pkg of ['openai', '@anthropic-ai/sdk', '@google/genai']) { const pj = r2.resolve(pkg + '/package.json'); if (!existsSync(pj)) process.exit(1); r2.resolve(pkg); } await import(pathToFileURL(join(dirname(piPkg), 'dist/api/openai-completions.js')).href);" >nul 2>&1
+node -e "const fs=require('node:fs'),p=require('node:path');const piLink=p.resolve('packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai');if(!fs.existsSync(p.join(piLink,'dist/api/openai-completions.js')))process.exit(1);let piReal=piLink;try{piReal=fs.realpathSync(piLink);}catch{}const nm=p.resolve(piReal,'..','..');const ok=(rel)=>fs.existsSync(p.join(nm,rel))||fs.existsSync(p.resolve('node_modules',rel));process.exit(ok('openai/package.json')&&ok('openai/index.mjs')&&ok('@anthropic-ai/sdk/package.json')&&ok('@google/genai/package.json')?0:1);" >nul 2>&1
 exit /b %ERRORLEVEL%
+
+:resolve_pnpm_args
+set "PNPM_EXTRA_ARGS=--prefer-offline"
+for /f "delims=" %%m in ('node -e "const fs=require('node:fs');if(fs.existsSync('node_modules/.modules.yaml')){const m=fs.readFileSync('node_modules/.modules.yaml','utf8').match(/^virtualStoreDirMaxLength:\s*(\d+)/m);if(m)process.stdout.write('--config.virtual-store-dir-max-length='+m[1]);}" 2^>nul') do set "PNPM_EXTRA_ARGS=--prefer-offline %%m"
+exit /b 0
 
 :check_only_done
 echo.
