@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Aras assistant UI",
+    "description": "Serves the RTL Persian Aras assistant interface and HTTP streaming bridge over the harness."
+  }
+}

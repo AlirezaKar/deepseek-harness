@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Aras-Assistent-Oberfläche",
+    "description": "Stellt die persische RTL-Oberfläche des Aras-Assistenten und die HTTP-Streaming-Brücke über dem Harness bereit."
+  }
+}
