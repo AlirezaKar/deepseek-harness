@@ -31,7 +31,7 @@ export type * from './types.ts'
 export const name = 'aras-ui'
 
 /** Services required before mounting `@deepseek-ai/dsh-aras-ui`. */
-export const inject = ['sessions']
+export const inject = ['sessions', 'agents']
 
 /** Plugin configuration for `@deepseek-ai/dsh-aras-ui`. */
 export interface Config {

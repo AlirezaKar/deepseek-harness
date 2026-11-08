@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import vm from 'node:vm'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { brandString } from '@deepseek-ai/dsh-brand'
@@ -47,9 +48,49 @@ describe('@deepseek-ai/dsh-aras-ui', () => {
     expect(html).toContain('خروج')
     expect(html).toContain('با زدن Enter پیام ارسال می‌شود؛ Shift+Enter برای خط جدید.')
     expect(html).toContain('۰ / ۱۰,۰۰۰ کاراکتر')
+    expect(html).toContain('aras-subheader-right')
+    expect(html).toContain('aras-subheader-left')
+    expect(html).toContain('id="aras-settled-list"')
+    expect(html).toContain('id="aras-live-slot"')
+    expect(html).not.toContain('arasFadeIn')
 
-    // Client-side SPA runtime must parse without syntax errors
+    // Client-side SPA runtime must parse without syntax errors and render GFM Markdown
     expect(() => new Function(ARAS_UI_SCRIPT)).not.toThrow()
+
+    const win: { __arasRenderMarkdown?: (raw: string) => string } = {}
+    const sandbox = vm.createContext({
+      window: win,
+      document: {
+        readyState: 'loading',
+        documentElement: { setAttribute() {} },
+        addEventListener() {},
+        getElementById() { return null },
+        querySelectorAll() { return [] },
+      },
+      localStorage: { getItem() { return 'dark' }, setItem() {} },
+      EventSource: function () {},
+      fetch: async () => ({ ok: true, headers: { get: () => 'application/json' }, json: async () => ({}) }),
+      setTimeout,
+      clearTimeout,
+    })
+    vm.runInContext(ARAS_UI_SCRIPT, sandbox)
+    expect(typeof win.__arasRenderMarkdown).toBe('function')
+
+    const rendered = win.__arasRenderMarkdown!([
+      '| ستون اول | ستون دوم | کد |',
+      '| :--- | :---: | ---: |',
+      '| **ردیف ۱** | مقدار \\| تست | `x | y` |',
+      '',
+      '```ts',
+      'const answer = 42',
+    ].join('\n'))
+    expect(rendered).toContain('<div class="aras-table-wrap"><table>')
+    expect(rendered).toContain('<th style="text-align:center;">ستون دوم</th>')
+    expect(rendered).toContain('<strong>ردیف ۱</strong>')
+    expect(rendered).toContain('مقدار | تست')
+    expect(rendered).toContain('<code class="inline">x | y</code>')
+    expect(rendered).toContain('aras-code-block')
+    expect(rendered).toContain('const answer = 42')
   })
 
   it('projects user turns, reasoning, and paired tool results while filtering synthetic injected user messages', () => {
@@ -253,8 +294,12 @@ describe('@deepseek-ai/dsh-aras-ui', () => {
     expect(initialSettingsRes.status).toBe(200)
     const initialSettings = (await initialSettingsRes.json()) as {
       preferences: { approvalMode: string }
+      credentials: Array<{ ref: string }>
     }
     expect(initialSettings.preferences.approvalMode).toBe('ask')
+    expect(initialSettings.credentials.map(c => c.ref)).toEqual(
+      expect.arrayContaining(['OPENROUTER_API_KEY', 'GEMINI_API_KEY', 'GROQ_API_KEY']),
+    )
 
     const customProviderRes = await fetch(`${baseUrl}/aras-api/settings/providers/custom`, {
       method: 'POST',

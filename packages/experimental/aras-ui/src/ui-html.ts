@@ -157,12 +157,12 @@ export function renderArasIndexHtml(): string {
         <section class="aras-view active" data-view="chat">
           <div class="aras-chat-column">
             <div class="aras-chat-subheader">
-              <!-- Spacer on right in RTL so left actions sit on the left -->
-              <div style="width:1px;"></div>
-              <div id="aras-chat-title" class="aras-chat-subheader-title">گفتگوی جدید</div>
-              <div class="aras-subheader-actions-left">
-                <button type="button" id="aras-active-model-pill" class="aras-subheader-model-pill" title="تغییر مدل هوش مصنوعی در تنظیمات">deepseek-official / deepseek-flash</button>
+              <div class="aras-subheader-side aras-subheader-right">
                 <button type="button" id="aras-pdf-btn" class="aras-pdf-btn">خروجی PDF</button>
+              </div>
+              <div id="aras-chat-title" class="aras-chat-subheader-title">گفتگوی جدید</div>
+              <div class="aras-subheader-side aras-subheader-left">
+                <button type="button" id="aras-active-model-pill" class="aras-subheader-model-pill" title="تغییر مدل هوش مصنوعی در تنظیمات">deepseek-official / deepseek-flash</button>
               </div>
             </div>
 
@@ -181,7 +181,11 @@ export function renderArasIndexHtml(): string {
               </div>
 
               <!-- Live Conversation Transcript -->
-              <div id="aras-transcript" class="aras-transcript"></div>
+              <div id="aras-transcript" class="aras-transcript">
+                <div id="aras-settled-list" class="aras-settled-list"></div>
+                <div id="aras-live-slot" class="aras-live-slot"></div>
+                <div id="aras-interactive-slot" class="aras-interactive-slot"></div>
+              </div>
             </div>
 
             <!-- Bottom Input Composer -->

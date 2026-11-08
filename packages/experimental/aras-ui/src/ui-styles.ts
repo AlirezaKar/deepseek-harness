@@ -10,6 +10,7 @@
 export const ARAS_UI_STYLES = /* css */ `
 :root,
 [data-theme="dark"] {
+  color-scheme: dark;
   --bg-header: #121722;
   --bg-sidebar: #141925;
   --bg-main: #171c26;
@@ -41,6 +42,7 @@ export const ARAS_UI_STYLES = /* css */ `
 }
 
 [data-theme="light"] {
+  color-scheme: light;
   --bg-header: #ffffff;
   --bg-sidebar: #f8fafc;
   --bg-main: #f1f5f9;
@@ -75,6 +77,26 @@ export const ARAS_UI_STYLES = /* css */ `
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.26) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.26);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.45);
 }
 
 html, body {
@@ -301,40 +323,52 @@ button, input, textarea, select {
   padding: 0 20px;
 }
 
-/* ── Chat Sub-header ─────────────────────────────────────────────────────── */
+/* ── Chat Sub-header (3-column RTL Grid: PDF Right | Title Center | Model Left) ─ */
 .aras-chat-subheader {
   min-height: 54px;
   border-bottom: 1px solid var(--border-subtle);
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
-  position: relative;
+  gap: 12px;
   padding: 10px 4px;
 }
 
+.aras-subheader-side {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.aras-subheader-right {
+  justify-content: flex-start;
+}
+
+.aras-subheader-left {
+  justify-content: flex-end;
+}
+
 .aras-chat-subheader-title {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  min-width: 0;
+  max-width: 100%;
+  justify-self: center;
+  text-align: center;
   font-size: 15.5px;
   font-weight: 700;
   color: var(--text-primary);
-  max-width: 50%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.aras-subheader-actions-left {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  unicode-bidi: plaintext;
 }
 
 .aras-subheader-model-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 4px 10px;
   border-radius: 8px;
   border: 1px solid var(--border-subtle);
@@ -343,6 +377,8 @@ button, input, textarea, select {
   font-size: 11.5px;
   cursor: pointer;
   direction: ltr;
+  text-align: left;
+  transition: border-color 0.15s ease, color 0.15s ease;
 }
 
 .aras-subheader-model-pill:hover {
@@ -351,6 +387,8 @@ button, input, textarea, select {
 }
 
 .aras-pdf-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
   padding: 5px 14px;
   border-radius: 8px;
   border: 1px solid var(--accent-border);
@@ -440,10 +478,25 @@ button, input, textarea, select {
 }
 
 /* ── Transcript Messages & Rich Harness Blocks ───────────────────────────── */
-.aras-transcript {
+.aras-transcript,
+.aras-settled-list,
+.aras-live-slot,
+.aras-interactive-slot {
   display: flex;
   flex-direction: column;
   gap: 18px;
+  width: 100%;
+}
+
+.aras-settled-list:empty,
+.aras-live-slot:empty,
+.aras-interactive-slot:empty {
+  display: none;
+}
+
+.aras-settled-entry {
+  display: flex;
+  flex-direction: column;
   width: 100%;
 }
 
@@ -451,12 +504,6 @@ button, input, textarea, select {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  animation: arasFadeIn 0.16s ease-out;
-}
-
-@keyframes arasFadeIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 
 .aras-msg-user {
@@ -656,29 +703,103 @@ button, input, textarea, select {
   word-break: break-word;
 }
 
-/* Markdown body */
+/* Markdown body (GFM Tables, Code Blocks, Blockquotes, Lists, Typography) */
 .aras-md {
   color: var(--text-primary);
-  line-height: 1.8;
+  line-height: 1.82;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
-.aras-md p {
-  margin-bottom: 10px;
+.aras-md > *:first-child {
+  margin-top: 0;
 }
 
-.aras-md p:last-child {
+.aras-md > *:last-child {
   margin-bottom: 0;
 }
 
-.aras-md h1, .aras-md h2, .aras-md h3, .aras-md h4 {
-  margin: 14px 0 8px;
-  font-weight: 700;
+.aras-md p {
+  margin: 0 0 11px;
 }
 
-.aras-md ul, .aras-md ol {
-  padding-right: 22px;
-  margin-bottom: 10px;
+.aras-md h1,
+.aras-md h2,
+.aras-md h3,
+.aras-md h4,
+.aras-md h5,
+.aras-md h6 {
+  margin: 16px 0 8px;
+  font-weight: 700;
+  line-height: 1.45;
+  color: var(--text-primary);
+}
+
+.aras-md h1 { font-size: 1.38em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 6px; }
+.aras-md h2 { font-size: 1.24em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 5px; }
+.aras-md h3 { font-size: 1.12em; }
+.aras-md h4 { font-size: 1.03em; }
+.aras-md h5, .aras-md h6 { font-size: 0.96em; color: var(--text-secondary); }
+
+.aras-md ul,
+.aras-md ol {
+  padding-right: 24px;
+  margin: 0 0 12px;
+}
+
+.aras-md li {
+  margin-bottom: 4px;
+}
+
+.aras-md li:last-child {
+  margin-bottom: 0;
+}
+
+.aras-md li.aras-task-item {
+  list-style: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-right: -18px;
+}
+
+.aras-md li.aras-task-item input[type="checkbox"] {
+  margin-top: 5px;
+  accent-color: var(--accent);
+}
+
+.aras-md blockquote {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border-right: 3px solid var(--accent);
+  border-radius: 8px 0 0 8px;
+  background: var(--accent-soft);
+  color: var(--text-secondary);
+}
+
+.aras-md blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+.aras-md hr.aras-hr {
+  border: none;
+  border-top: 1px solid var(--border-strong);
+  margin: 16px 0;
+}
+
+.aras-md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.aras-md a:hover {
+  color: var(--accent-hover);
+}
+
+.aras-md del {
+  color: var(--text-muted);
+  text-decoration: line-through;
 }
 
 .aras-md code.inline {
@@ -692,8 +813,112 @@ button, input, textarea, select {
   border: 1px solid var(--border-subtle);
 }
 
+.aras-code-block {
+  direction: ltr;
+  text-align: left;
+  margin: 12px 0;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--code-bg);
+  overflow: hidden;
+}
+
+.aras-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+
+.aras-code-lang {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-transform: lowercase;
+}
+
+.aras-code-copy-btn {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #cbd5e1;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.aras-code-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.aras-code-block .aras-code-pre {
+  margin: 0;
+  border-radius: 0;
+  max-height: 440px;
+}
+
 .aras-md pre {
   margin: 10px 0;
+}
+
+.aras-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-card);
+}
+
+.aras-md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+
+.aras-md thead th {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-weight: 700;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-strong);
+  border-left: 1px solid var(--border-subtle);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.aras-md thead th:last-child,
+.aras-md tbody td:last-child {
+  border-left: none;
+}
+
+.aras-md tbody td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  vertical-align: top;
+}
+
+.aras-md tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.aras-md tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.024);
+}
+
+[data-theme="light"] .aras-md tbody tr:nth-child(even) td {
+  background: rgba(15, 23, 42, 0.025);
+}
+
+.aras-md tbody tr:hover td {
+  background: var(--bg-hover);
 }
 
 /* Interactive Approval & Question Cards */
@@ -1110,6 +1335,10 @@ button, input, textarea, select {
   .aras-composer-hint {
     display: none;
   }
+  .aras-chat-subheader {
+    grid-template-columns: auto minmax(0, 1fr) minmax(0, 140px);
+    gap: 8px;
+  }
 }
 
 @media print {
@@ -1117,7 +1346,8 @@ button, input, textarea, select {
   .aras-sidebar,
   .aras-composer-wrap,
   .aras-pdf-btn,
-  .aras-subheader-model-pill {
+  .aras-subheader-model-pill,
+  .aras-code-copy-btn {
     display: none !important;
   }
   html, body, .aras-shell, .aras-body, .aras-main, .aras-view, .aras-chat-column, .aras-chat-scroll {
@@ -1131,6 +1361,15 @@ button, input, textarea, select {
     background: #ffffff !important;
     color: #000000 !important;
     break-inside: avoid;
+  }
+  .aras-table-wrap,
+  .aras-md thead th,
+  .aras-md tbody td {
+    border-color: #cbd5e1 !important;
+    color: #000000 !important;
+  }
+  .aras-md thead th {
+    background: #f1f5f9 !important;
   }
 }
 `

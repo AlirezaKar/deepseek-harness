@@ -48,11 +48,24 @@ import type {
 
 const STANDARD_CREDENTIAL_REFS: readonly { readonly ref: string; readonly label: string }[] = [
   { ref: 'DEEPSEEK_API_KEY', label: 'کلید API دیپ‌سیک (DeepSeek Official)' },
+  { ref: 'OPENROUTER_API_KEY', label: 'کلید API اوپن‌روتر (OpenRouter)' },
+  { ref: 'GEMINI_API_KEY', label: 'کلید API گوگل جمینای (Google Gemini)' },
+  { ref: 'GROQ_API_KEY', label: 'کلید API گروک (Groq)' },
   { ref: 'OPENAI_API_KEY', label: 'کلید API اوپن‌ای‌آی (OpenAI)' },
   { ref: 'ANTHROPIC_API_KEY', label: 'کلید API آنتروپیک (Anthropic Claude)' },
-  { ref: 'GEMINI_API_KEY', label: 'کلید API گوگل جمینای (Google Gemini)' },
-  { ref: 'OPENROUTER_API_KEY', label: 'کلید API اوپن‌روتر (OpenRouter)' },
 ]
+
+/** Built-in `llm-pi-ai` catalog provider routes keyed by standard API key env var. */
+const BUILTIN_PI_AI_CREDENTIAL_ROUTES: Readonly<Record<string, { readonly id: string; readonly displayName: string }>> = {
+  OPENROUTER_API_KEY: { id: 'openrouter', displayName: 'OpenRouter' },
+  GEMINI_API_KEY: { id: 'google', displayName: 'Google Gemini' },
+  GROQ_API_KEY: { id: 'groq', displayName: 'Groq' },
+  OPENAI_API_KEY: { id: 'openai', displayName: 'OpenAI' },
+  ANTHROPIC_API_KEY: { id: 'anthropic', displayName: 'Anthropic Claude' },
+  XAI_API_KEY: { id: 'xai', displayName: 'xAI (Grok)' },
+  MISTRAL_API_KEY: { id: 'mistral', displayName: 'Mistral AI' },
+  TOGETHER_API_KEY: { id: 'together', displayName: 'Together AI' },
+}
 
 interface PendingApprovalEntry {
   readonly view: ArasPendingApproval
@@ -330,6 +343,7 @@ export class ArasHostBridge {
   private readonly pendingQuestions = new Map<string, PendingQuestionEntry>()
   private readonly subscribers = new Set<(event: ArasStreamEvent) => void>()
   private readonly disposers: (() => void)[] = []
+  private readonly dismissedBuiltinRoutes = new Set<string>()
   private readonly lifetime = new AbortController()
 
   /**
@@ -658,6 +672,7 @@ export class ArasHostBridge {
   async createSession(requestedCwd?: string): Promise<ArasSessionDetail> {
     const cwd = resolve(requestedCwd !== undefined && requestedCwd.trim().length > 0 ? requestedCwd : this.defaultCwd)
     await mkdir(cwd, { recursive: true })
+    await this.sanitizeSavedDefaultSelection()
     const sessionId = brandString<SessionId>(`aras-${randomUUID()}`)
     const presets = this.ctx.get('agentPresets')
     const resolvedPreset = presets === undefined ? undefined : (await presets.resolve(undefined)).id
@@ -843,11 +858,10 @@ export class ArasHostBridge {
    */
   async getSettingsSnapshot(): Promise<ArasSettingsSnapshot> {
     const defaultSel = this.currentDefaultSelection()
-    const { groups, failures } = await this.buildLiveCatalog()
     const settingsSvc = this.ctx.get('settings')
     const credentialsSvc = this.ctx.get('credentials')
 
-    const namespaces = settingsSvc?.describe({ redactSecrets: true }) ?? []
+    let namespaces = settingsSvc?.describe({ redactSecrets: true }) ?? []
     const deepseekNs = namespaces.find(item => String(item.ns) === 'llm-deepseek')
     const deepseekVal = isPlainRecord(deepseekNs?.value) ? deepseekNs.value : {}
     const deepseekConfig = {
@@ -858,9 +872,38 @@ export class ArasHostBridge {
       reasoningEffort: typeof deepseekVal.reasoningEffort === 'string' ? deepseekVal.reasoningEffort : '',
     }
 
-    const piAiNs = namespaces.find(item => String(item.ns) === 'llm-pi-ai')
-    const piAiVal = isPlainRecord(piAiNs?.value) ? piAiNs.value : {}
-    const rawProviders = isPlainRecord(piAiVal.providers) ? piAiVal.providers : {}
+    let piAiNs = namespaces.find(item => String(item.ns) === 'llm-pi-ai')
+    let piAiVal = isPlainRecord(piAiNs?.value) ? piAiNs.value : {}
+    let rawProviders = isPlainRecord(piAiVal.providers) ? piAiVal.providers : {}
+
+    // Auto-activate built-in pi-ai catalog routes (OpenRouter, Gemini, Groq, OpenAI, Anthropic)
+    // when their standard API key is already saved in credentials and not manually dismissed.
+    if (settingsSvc?.writable === true && credentialsSvc !== undefined) {
+      const autoOps: { op: 'set'; path: readonly string[]; value: unknown }[] = []
+      const addedRouteIds: string[] = []
+      for (const [envRef, routeMeta] of Object.entries(BUILTIN_PI_AI_CREDENTIAL_ROUTES)) {
+        if (routeMeta.id in rawProviders || this.dismissedBuiltinRoutes.has(routeMeta.id)) continue
+        const credInfo = await credentialsSvc.describe(credentialRef(envRef))
+        if (credInfo.configured) {
+          autoOps.push({
+            op: 'set',
+            path: ['providers', routeMeta.id],
+            value: { displayName: routeMeta.displayName, apiKeyEnv: envRef },
+          })
+          addedRouteIds.push(routeMeta.id)
+        }
+      }
+      if (autoOps.length > 0) {
+        await settingsSvc.mutate(brandString<SettingsNamespace>('llm-pi-ai'), autoOps)
+        await this.waitForProviderRoutes(addedRouteIds, true)
+        namespaces = settingsSvc.describe({ redactSecrets: true })
+        piAiNs = namespaces.find(item => String(item.ns) === 'llm-pi-ai')
+        piAiVal = isPlainRecord(piAiNs?.value) ? piAiNs.value : {}
+        rawProviders = isPlainRecord(piAiVal.providers) ? piAiVal.providers : {}
+      }
+    }
+
+    const { groups, failures } = await this.buildLiveCatalog()
     const customProviders: ArasCustomProviderProfile[] = []
     const extraRefs = new Set<string>()
     if (deepseekConfig.apiKeyEnv.length > 0) extraRefs.add(deepseekConfig.apiKeyEnv)
@@ -882,7 +925,7 @@ export class ArasHostBridge {
       customProviders.push({
         id,
         displayName: typeof profile.displayName === 'string' && profile.displayName.length > 0 ? profile.displayName : id,
-        api: typeof profile.api === 'string' ? profile.api : 'openai-completions',
+        api: typeof profile.api === 'string' && profile.api.length > 0 ? profile.api : 'catalog-default',
         baseURL: typeof profile.baseURL === 'string' ? profile.baseURL : '',
         apiKeyEnv,
         models,
@@ -956,6 +999,24 @@ export class ArasHostBridge {
         throw new Error('مقدار کلید API نمی‌تواند خالی باشد.')
       }
       await credentialsSvc.set(branded, value.trim())
+
+      const builtinRoute = BUILTIN_PI_AI_CREDENTIAL_ROUTES[ref]
+      const settingsSvc = this.ctx.get('settings')
+      if (builtinRoute !== undefined && settingsSvc?.writable === true) {
+        this.dismissedBuiltinRoutes.delete(builtinRoute.id)
+        const namespaces = settingsSvc.describe({ redactSecrets: true })
+        const piAiNs = namespaces.find(item => String(item.ns) === 'llm-pi-ai')
+        const piAiVal = isPlainRecord(piAiNs?.value) ? piAiNs.value : {}
+        const rawProviders = isPlainRecord(piAiVal.providers) ? piAiVal.providers : {}
+        if (!(builtinRoute.id in rawProviders)) {
+          await settingsSvc.mutate(brandString<SettingsNamespace>('llm-pi-ai'), [{
+            op: 'set',
+            path: ['providers', builtinRoute.id],
+            value: { displayName: builtinRoute.displayName, apiKeyEnv: ref },
+          }])
+          await this.waitForProviderRoutes([builtinRoute.id], true)
+        }
+      }
     }
   }
 
@@ -972,12 +1033,17 @@ export class ArasHostBridge {
     if (input.provider.trim().length === 0 || input.model.trim().length === 0) {
       throw new Error('انتخاب ارائه‌دهنده و نام مدل الزامی است.')
     }
+    const provider = input.provider.trim()
+    const model = input.model.trim()
+    const normalizedEffort = await this.normalizeReasoningEffort(
+      provider,
+      model,
+      input.reasoningEffort?.trim(),
+    )
     const selection: ModelSelection = {
-      provider: input.provider.trim(),
-      model: input.model.trim(),
-      ...(input.reasoningEffort === undefined || input.reasoningEffort.trim().length === 0
-        ? {}
-        : { reasoningEffort: ReasoningEffortId(input.reasoningEffort.trim()) }),
+      provider,
+      model,
+      ...(normalizedEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(normalizedEffort) }),
     }
     const defaults = this.ctx.get('agentDefaultModel')
     if (defaults !== undefined) {
@@ -1059,10 +1125,13 @@ export class ArasHostBridge {
     }
     const ns = brandString<SettingsNamespace>('llm-pi-ai')
     if ('remove' in input) {
+      this.dismissedBuiltinRoutes.add(routeId)
       await settingsSvc.mutate(ns, [{ op: 'unset', path: ['providers', routeId] }])
+      await this.waitForProviderRoutes([routeId], false)
       return
     }
 
+    this.dismissedBuiltinRoutes.delete(routeId)
     const profile: Record<string, unknown> = {}
     if (input.displayName !== undefined && input.displayName.trim().length > 0) {
       profile.displayName = input.displayName.trim()
@@ -1086,6 +1155,60 @@ export class ArasHostBridge {
     }
 
     await settingsSvc.mutate(ns, [{ op: 'set', path: ['providers', routeId], value: profile }])
+    await this.waitForProviderRoutes([routeId], true)
+  }
+
+  private async waitForProviderRoutes(routeIds: readonly string[], shouldExist: boolean): Promise<void> {
+    const llm = this.ctx.get('llm')
+    if (llm === undefined || routeIds.length === 0) return
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const registered = new Set(llm.listProviders().map(item => item.id))
+      const settled = routeIds.every(id => registered.has(id) === shouldExist)
+      if (settled) return
+      await new Promise<void>(resolveDelay => setTimeout(resolveDelay, 50))
+    }
+  }
+
+  private async normalizeReasoningEffort(
+    provider: string,
+    model: string,
+    requested: string | undefined,
+  ): Promise<string | undefined> {
+    const trimmed = requested?.trim()
+    if (trimmed === undefined || trimmed.length === 0) return undefined
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) return trimmed
+    try {
+      const info = await llm.resolveModelInfo(provider, model)
+      if (info.reasoning === undefined) return undefined
+      if (info.reasoning.efforts.some(effort => String(effort.id) === trimmed)) {
+        return trimmed
+      }
+      return info.reasoning.defaultEffort === undefined
+        ? undefined
+        : String(info.reasoning.defaultEffort)
+    } catch {
+      return trimmed
+    }
+  }
+
+  private async sanitizeSavedDefaultSelection(): Promise<void> {
+    const defaults = this.ctx.get('agentDefaultModel')
+    if (defaults === undefined) return
+    const current = defaults.currentSelection()
+    if (current.reasoningEffort === undefined) return
+    const normalized = await this.normalizeReasoningEffort(
+      current.provider,
+      current.model,
+      String(current.reasoningEffort),
+    )
+    if (normalized !== String(current.reasoningEffort)) {
+      await defaults.saveSelection({
+        provider: current.provider,
+        model: current.model,
+        ...(normalized === undefined ? {} : { reasoningEffort: ReasoningEffortId(normalized) }),
+      })
+    }
   }
 
   /**
@@ -1251,6 +1374,7 @@ export class ArasHostBridge {
       presetId = obs.header.agentPreset
     }
     const resolvedPreset = presets === undefined ? undefined : (await presets.resolve(presetId)).id
+    await this.sanitizeSavedDefaultSelection()
 
     const handle = await this.ctx.agents.resume({
       resumeSessionId: sessionId,

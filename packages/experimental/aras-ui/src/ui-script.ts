@@ -48,49 +48,288 @@ export const ARAS_UI_SCRIPT = `
       .replace(/'/g, '&#39;');
   }
 
+  function parsePersianDigitsToAscii(str) {
+    return String(str || '').replace(/[۰-۹]/g, function (ch) {
+      var idx = PERSIAN_DIGITS.indexOf(ch);
+      return idx >= 0 ? String(idx) : ch;
+    });
+  }
+
+  function splitTableCells(line) {
+    var s = String(line || '').trim();
+    if (s.charAt(0) === '|') s = s.slice(1);
+    if (s.length > 0 && s.charAt(s.length - 1) === '|' && s.charAt(s.length - 2) !== '\\\\') {
+      s = s.slice(0, -1);
+    }
+    var cells = [];
+    var cur = '';
+    var inCode = false;
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      if (ch === '\\\\' && i + 1 < s.length) {
+        var next = s.charAt(i + 1);
+        if (next === '|' || next === '\\\\' || next === '\`') {
+          cur += next;
+          i++;
+          continue;
+        }
+      }
+      if (ch === '\`') {
+        inCode = !inCode;
+        cur += ch;
+        continue;
+      }
+      if (ch === '|' && !inCode) {
+        cells.push(cur.trim());
+        cur = '';
+        continue;
+      }
+      cur += ch;
+    }
+    cells.push(cur.trim());
+    return cells;
+  }
+
+  function parseTableDelimiter(line, expectedCols) {
+    var raw = String(line || '').trim();
+    if (!raw || raw.indexOf('|') < 0 || raw.indexOf('-') < 0) return null;
+    var cells = splitTableCells(raw);
+    if (cells.length === 0 || cells.length !== expectedCols) return null;
+    var aligns = [];
+    for (var i = 0; i < cells.length; i++) {
+      var c = cells[i].trim();
+      if (!/^:?-{2,}:?$/.test(c)) return null;
+      var leftColon = c.charAt(0) === ':';
+      var rightColon = c.charAt(c.length - 1) === ':';
+      if (leftColon && rightColon) aligns.push('center');
+      else if (rightColon) aligns.push('right');
+      else if (leftColon) aligns.push('left');
+      else aligns.push('');
+    }
+    return aligns;
+  }
+
+  function formatInline(str) {
+    if (!str) return '';
+    var inlineTokens = [];
+    function stashToken(htmlFragment) {
+      var idx = inlineTokens.length;
+      inlineTokens.push(htmlFragment);
+      return '\\u0000ARAS_INL_' + idx + '\\u0000';
+    }
+
+    var working = String(str);
+
+    /* 1. Protect inline code spans first so *, _, |, and URLs inside backticks stay untouched */
+    working = working.replace(/\`([^\`\\n]+)\`/g, function (_m, codeContent) {
+      return stashToken('<code class="inline">' + escapeHtml(codeContent) + '</code>');
+    });
+
+    /* 2. Escape remaining HTML before applying inline emphasis/link rules */
+    var s = escapeHtml(working);
+
+    /* 3. Protect Markdown links [label](url) so underscores in URLs are never turned into <em> */
+    s = s.replace(/\\[([^\\]\\n]+)\\]\\(((?:https?:\\/\\/|mailto:)[^\\s)]+)\\)/g, function (_m, label, href) {
+      return stashToken('<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + label + '</a>');
+    });
+
+    /* 4. Bold+Italic, Bold, Strikethrough, and word-bounded Italic */
+    s = s.replace(/\\*\\*\\*([^\\s*](?:[\\s\\S]*?[^\\s*])?)\\*\\*\\*/g, '<strong><em>$1</em></strong>');
+    s = s.replace(/\\*\\*([^\\s*](?:[\\s\\S]*?[^\\s*])?)\\*\\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[\\s(«\\[>])__([^\\s_](?:[\\s\\S]*?[^\\s_])?)__(?=$|[\\s).,!?:;،؛»\\]<])/g, '$1<strong>$2</strong>');
+    s = s.replace(/~~([^\\s~](?:[\\s\\S]*?[^\\s~])?)~~/g, '<del>$1</del>');
+    s = s.replace(/(^|[^*])\\*([^\\s*](?:[^*]*?[^\\s*])?)\\*(?!\\*)/g, '$1<em>$2</em>');
+    s = s.replace(/(^|[\\s(«\\[>])_([^\\s_](?:[^_]*?[^\\s_])?)_(?=$|[\\s).,!?:;،؛»\\]<])/g, '$1<em>$2</em>');
+
+    /* 5. Restore protected inline code and link tokens */
+    s = s.replace(/\\u0000ARAS_INL_(\\d+)\\u0000/g, function (_m, idxStr) {
+      return inlineTokens[Number(idxStr)] || '';
+    });
+    return s;
+  }
+
   function renderMarkdown(raw) {
     if (!raw) return '';
-    var text = String(raw).replace(/\\r\\n/g, '\\n');
+    var text = String(raw).replace(/\\r\\n?/g, '\\n');
     var codeBlocks = [];
-    text = text.replace(/\`\`\`([a-zA-Z0-9_-]*)\\n([\\s\\S]*?)\`\`\`/g, function (_m, lang, code) {
+
+    function pushCodeBlock(info, code) {
       var idx = codeBlocks.length;
-      var header = lang ? '<div style="font-size:11px;color:#94a3b8;margin-bottom:6px;font-family:monospace;">' + escapeHtml(lang) + '</div>' : '';
-      codeBlocks.push('<pre class="aras-code-pre">' + header + escapeHtml(code.replace(/\\n$/, '')) + '</pre>');
-      return '@@ARAS_CODE_' + idx + '@@';
+      var lang = String(info || '').trim().split(/\\s+/)[0] || '';
+      var cleanCode = String(code || '').replace(/\\n$/, '');
+      var header = '<div class="aras-code-header"><span class="aras-code-lang">' + escapeHtml(lang || 'code') + '</span><button type="button" class="aras-code-copy-btn" data-copy-code="1">کپی</button></div>';
+      codeBlocks.push('<div class="aras-code-block">' + header + '<pre class="aras-code-pre"><code>' + escapeHtml(cleanCode) + '</code></pre></div>');
+      return '\\n@@ARAS_CODE_' + idx + '@@\\n';
+    }
+
+    /* Closed fenced code blocks */
+    text = text.replace(/\`\`\`([^\\n\`]*)\\n([\\s\\S]*?)\`\`\`/g, function (_m, info, code) {
+      return pushCodeBlock(info, code);
+    });
+    /* Live-streaming unclosed fenced code block at end of response */
+    text = text.replace(/(^|\\n)\`\`\`([^\\n\`]*)\\n([\\s\\S]*)$/g, function (_m, prefix, info, code) {
+      return prefix + pushCodeBlock(info, code);
     });
 
     var lines = text.split('\\n');
     var htmlParts = [];
-    var inList = false;
+    var paraLines = [];
+    var listType = null;
+    var quoteLines = [];
+
+    function flushParagraph() {
+      if (paraLines.length > 0) {
+        htmlParts.push('<p>' + paraLines.join('<br />') + '</p>');
+        paraLines = [];
+      }
+    }
+
+    function closeList() {
+      if (listType) {
+        htmlParts.push('</' + listType + '>');
+        listType = null;
+      }
+    }
+
+    function flushBlockquote() {
+      if (quoteLines.length > 0) {
+        htmlParts.push('<blockquote>' + renderMarkdown(quoteLines.join('\\n')) + '</blockquote>');
+        quoteLines = [];
+      }
+    }
 
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i];
-      var codeMatch = /^@@ARAS_CODE_(\\d+)@@$/.exec(line.trim());
+      var trimmed = line.trim();
+
+      /* 1. Fenced code block placeholder */
+      var codeMatch = /^@@ARAS_CODE_(\\d+)@@$/.exec(trimmed);
       if (codeMatch) {
-        if (inList) { htmlParts.push('</ul>'); inList = false; }
-        htmlParts.push(codeBlocks[Number(codeMatch[1])]);
+        flushParagraph();
+        closeList();
+        flushBlockquote();
+        htmlParts.push(codeBlocks[Number(codeMatch[1])] || '');
         continue;
       }
-      if (/^#{1,4}\\s+/.test(line)) {
-        if (inList) { htmlParts.push('</ul>'); inList = false; }
-        var level = line.match(/^#+/)[0].length;
-        var headingText = formatInline(line.replace(/^#{1,4}\\s+/, ''));
-        htmlParts.push('<h' + level + '>' + headingText + '</h' + level + '>');
+
+      /* 2. Blank line */
+      if (trimmed === '') {
+        flushParagraph();
+        closeList();
+        flushBlockquote();
         continue;
       }
-      if (/^[-*]\\s+/.test(line)) {
-        if (!inList) { htmlParts.push('<ul>'); inList = true; }
-        htmlParts.push('<li>' + formatInline(line.replace(/^[-*]\\s+/, '')) + '</li>');
+
+      /* 3. GFM Table (header row + delimiter row + 0..N body rows, including streaming rows) */
+      if (line.indexOf('|') >= 0 && i + 1 < lines.length) {
+        var headerCells = splitTableCells(line);
+        var aligns = headerCells.length >= 1 ? parseTableDelimiter(lines[i + 1], headerCells.length) : null;
+        if (aligns) {
+          flushParagraph();
+          closeList();
+          flushBlockquote();
+
+          var tbl = '<div class="aras-table-wrap"><table><thead><tr>';
+          for (var h = 0; h < headerCells.length; h++) {
+            var hStyle = aligns[h] ? ' style="text-align:' + aligns[h] + ';"' : '';
+            tbl += '<th' + hStyle + '>' + formatInline(headerCells[h]) + '</th>';
+          }
+          tbl += '</tr></thead><tbody>';
+
+          i += 2;
+          while (i < lines.length) {
+            var rowLine = lines[i];
+            var rowTrim = rowLine.trim();
+            if (!rowTrim || rowLine.indexOf('|') < 0 || /^@@ARAS_CODE_\\d+@@$/.test(rowTrim) || /^#{1,6}\\s+/.test(rowTrim)) {
+              i--;
+              break;
+            }
+            var rowCells = splitTableCells(rowLine);
+            tbl += '<tr>';
+            for (var c = 0; c < headerCells.length; c++) {
+              var cStyle = aligns[c] ? ' style="text-align:' + aligns[c] + ';"' : '';
+              var cellVal = c < rowCells.length ? formatInline(rowCells[c]) : '';
+              tbl += '<td' + cStyle + '>' + cellVal + '</td>';
+            }
+            tbl += '</tr>';
+            i++;
+          }
+
+          tbl += '</tbody></table></div>';
+          htmlParts.push(tbl);
+          continue;
+        }
+      }
+
+      /* 4. Blockquote (> ...) */
+      var quoteMatch = /^\\s*>\\s?(.*)$/.exec(line);
+      if (quoteMatch) {
+        flushParagraph();
+        closeList();
+        quoteLines.push(quoteMatch[1]);
         continue;
       }
-      if (line.trim() === '') {
-        if (inList) { htmlParts.push('</ul>'); inList = false; }
+      flushBlockquote();
+
+      /* 5. Headings (# to ######) */
+      var headingMatch = /^\\s*(#{1,6})\\s+(.+)$/.exec(line);
+      if (headingMatch) {
+        flushParagraph();
+        closeList();
+        var hLevel = headingMatch[1].length;
+        htmlParts.push('<h' + hLevel + '>' + formatInline(headingMatch[2].trim()) + '</h' + hLevel + '>');
         continue;
       }
-      if (inList) { htmlParts.push('</ul>'); inList = false; }
-      htmlParts.push('<p>' + formatInline(line) + '</p>');
+
+      /* 6. Horizontal rule (---, ***, ___) */
+      if (/^\\s*(?:\\*{3,}|-{3,}|_{3,})\\s*$/.test(line)) {
+        flushParagraph();
+        closeList();
+        htmlParts.push('<hr class="aras-hr" />');
+        continue;
+      }
+
+      /* 7. Unordered list & GFM task list (-, *, +, •) */
+      var ulMatch = /^\\s*[-*+•]\\s+(.+)$/.exec(line);
+      if (ulMatch) {
+        flushParagraph();
+        if (listType !== 'ul') {
+          closeList();
+          htmlParts.push('<ul>');
+          listType = 'ul';
+        }
+        var taskMatch = /^\\[([ xX])\\]\\s+(.+)$/.exec(ulMatch[1]);
+        if (taskMatch) {
+          var isChecked = taskMatch[1].toLowerCase() === 'x';
+          htmlParts.push('<li class="aras-task-item"><input type="checkbox" disabled' + (isChecked ? ' checked' : '') + ' /><span>' + formatInline(taskMatch[2]) + '</span></li>');
+        } else {
+          htmlParts.push('<li>' + formatInline(ulMatch[1]) + '</li>');
+        }
+        continue;
+      }
+
+      /* 8. Ordered list (1. / 1) / ۱.) */
+      var olMatch = /^\\s*(\\d+|[۰-۹]+)[.)]\\s+(.+)$/.exec(line);
+      if (olMatch) {
+        flushParagraph();
+        if (listType !== 'ol') {
+          closeList();
+          var startNum = Number(parsePersianDigitsToAscii(olMatch[1])) || 1;
+          htmlParts.push('<ol' + (startNum > 1 ? ' start="' + startNum + '"' : '') + '>');
+          listType = 'ol';
+        }
+        htmlParts.push('<li>' + formatInline(olMatch[2]) + '</li>');
+        continue;
+      }
+
+      /* 9. Standard paragraph line */
+      closeList();
+      paraLines.push(formatInline(line));
     }
-    if (inList) htmlParts.push('</ul>');
+
+    flushParagraph();
+    closeList();
+    flushBlockquote();
 
     var joined = htmlParts.join('');
     joined = joined.replace(/@@ARAS_CODE_(\\d+)@@/g, function (_m, n) {
@@ -99,12 +338,8 @@ export const ARAS_UI_SCRIPT = `
     return joined;
   }
 
-  function formatInline(str) {
-    var s = escapeHtml(str);
-    s = s.replace(/\`([^\`]+)\`/g, '<code class="inline">$1</code>');
-    s = s.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
-    s = s.replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color:var(--accent);">$1</a>');
-    return s;
+  if (typeof window !== 'undefined') {
+    window.__arasRenderMarkdown = renderMarkdown;
   }
 
   function showToast(msg) {
@@ -228,6 +463,7 @@ export const ARAS_UI_SCRIPT = `
     if (!pill || !sel) return;
     var label = sel.provider + ' / ' + sel.model + (sel.reasoningEffort ? ' (' + sel.reasoningEffort + ')' : '');
     pill.textContent = label;
+    pill.title = label + ' — کلیک برای تغییر مدل هوش مصنوعی';
   }
 
   /* ── Rendering Chat Surface ───────────────────────────────────────────── */
@@ -322,94 +558,311 @@ export const ARAS_UI_SCRIPT = `
     return html;
   }
 
-  function renderChatSurface(scrollToBottom) {
+  function isScrolledNearBottom(el) {
+    if (!el) return true;
+    return (el.scrollHeight - el.scrollTop - el.clientHeight) <= 110;
+  }
+
+  function syncChatHeaderAndHero() {
     var titleEl = document.getElementById('aras-chat-title');
-    if (titleEl) titleEl.textContent = state.currentSessionTitle || 'گفتگوی جدید';
+    var nextTitle = state.currentSessionTitle || 'گفتگوی جدید';
+    if (titleEl && titleEl.textContent !== nextTitle) {
+      titleEl.textContent = nextTitle;
+      titleEl.title = nextTitle;
+    }
 
     var hero = document.getElementById('aras-welcome-hero');
-    var transcriptEl = document.getElementById('aras-transcript');
-    var scrollContainer = document.getElementById('aras-chat-scroll');
-    if (!hero || !transcriptEl || !scrollContainer) return;
+    if (hero) {
+      var hasActivity = state.items.length > 0 || !!state.liveStream || state.sessionStatus === 'running' || state.pendingApprovals.length > 0 || state.pendingQuestions.length > 0;
+      hero.classList.toggle('hidden', hasActivity);
+    }
+  }
 
-    var hasActivity = state.items.length > 0 || !!state.liveStream || state.pendingApprovals.length > 0 || state.pendingQuestions.length > 0;
-    hero.classList.toggle('hidden', hasActivity);
-
+  function renderSingleSettledItemHtml(item) {
     var parts = [];
-    for (var i = 0; i < state.items.length; i++) {
-      var item = state.items[i];
-      if (item.kind === 'user') {
-        parts.push('<div class="aras-msg-row">');
-        parts.push('<div class="aras-msg-user">');
-        if (item.images && item.images.length > 0) {
-          parts.push('<div class="aras-msg-images">');
-          for (var im = 0; im < item.images.length; im++) {
-            parts.push('<img src="' + escapeHtml(item.images[im].url) + '" alt="پیوست" />');
-          }
-          parts.push('</div>');
+    if (item.kind === 'user') {
+      parts.push('<div class="aras-msg-row"><div class="aras-msg-user">');
+      if (item.images && item.images.length > 0) {
+        parts.push('<div class="aras-msg-images">');
+        for (var im = 0; im < item.images.length; im++) {
+          parts.push('<img src="' + escapeHtml(item.images[im].url) + '" alt="پیوست" />');
         }
-        parts.push(escapeHtml(item.text));
-        parts.push('</div></div>');
-      } else if (item.kind === 'assistant') {
-        parts.push('<div class="aras-msg-row"><div class="aras-msg-assistant">');
-        parts.push('<div class="aras-msg-meta"><span>دستیار هوشمند ارس</span><span class="aras-msg-meta-model">' + escapeHtml((item.provider && item.model) ? (item.provider + '/' + item.model) : '') + '</span></div>');
-        if (item.reasoning) {
-          parts.push(renderReasoningCardHtml(item.reasoning, 'settled-' + item.id, false));
+        parts.push('</div>');
+      }
+      parts.push(escapeHtml(item.text));
+      parts.push('</div></div>');
+    } else if (item.kind === 'assistant') {
+      parts.push('<div class="aras-msg-row"><div class="aras-msg-assistant">');
+      parts.push('<div class="aras-msg-meta"><span>دستیار هوشمند ارس</span><span class="aras-msg-meta-model">' + escapeHtml((item.provider && item.model) ? (item.provider + '/' + item.model) : '') + '</span></div>');
+      if (item.reasoning) {
+        parts.push(renderReasoningCardHtml(item.reasoning, 'settled-' + item.id, false));
+      }
+      if (item.tools && item.tools.length > 0) {
+        for (var t = 0; t < item.tools.length; t++) {
+          parts.push(renderToolCardHtml(item.tools[t], 'tool-' + item.tools[t].callId));
         }
-        if (item.tools && item.tools.length > 0) {
-          for (var t = 0; t < item.tools.length; t++) {
-            parts.push(renderToolCardHtml(item.tools[t], 'tool-' + item.tools[t].callId));
-          }
-        }
-        if (item.text) {
-          parts.push('<div class="aras-md">' + renderMarkdown(item.text) + '</div>');
-        }
-        if (item.interrupted) {
-          parts.push('<div style="font-size:12px;color:var(--warning);">⏹ پاسخ توسط کاربر متوقف شد.</div>');
-        }
-        parts.push('</div></div>');
-      } else if (item.kind === 'error') {
-        parts.push('<div class="aras-interactive-card" style="border-color:var(--danger);"><div class="aras-interactive-title" style="color:var(--danger);">خطا در اجرای درخواست</div><div style="font-size:13px;">' + escapeHtml(item.message) + '</div></div>');
+      }
+      if (item.text) {
+        parts.push('<div class="aras-md">' + renderMarkdown(item.text) + '</div>');
+      }
+      if (item.interrupted) {
+        parts.push('<div style="font-size:12px;color:var(--warning);">⏹ پاسخ توسط کاربر متوقف شد.</div>');
+      }
+      parts.push('</div></div>');
+    } else if (item.kind === 'error') {
+      parts.push('<div class="aras-interactive-card" style="border-color:var(--danger);"><div class="aras-interactive-title" style="color:var(--danger);">خطا در اجرای درخواست</div><div style="font-size:13px;">' + escapeHtml(item.message) + '</div></div>');
+    }
+    return parts.join('');
+  }
+
+  function quickHash(str) {
+    var s = String(str || '');
+    var h = 5381;
+    for (var i = 0; i < s.length; i++) {
+      h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    }
+    return s.length + ':' + h;
+  }
+
+  function computeSettledItemSig(item) {
+    var toolState = '';
+    if (item.tools && item.tools.length > 0) {
+      for (var i = 0; i < item.tools.length; i++) {
+        var tl = item.tools[i];
+        toolState += tl.callId + ':' + tl.status + ':' + quickHash(tl.resultText) + ':' + (tl.errorReason || '') + ':' + (state.openCards['tool-' + tl.callId] ? '1' : '0') + ';';
       }
     }
+    var rState = state.userToggledReasoning['settled-' + item.id];
+    return [
+      item.kind,
+      item.id,
+      quickHash(item.text),
+      quickHash(item.reasoning),
+      item.interrupted ? '1' : '0',
+      item.message || '',
+      rState === undefined ? 'u' : (rState ? '1' : '0'),
+      toolState
+    ].join('|');
+  }
+
+  function syncSettledItems() {
+    var settledList = document.getElementById('aras-settled-list');
+    if (!settledList) return;
+
+    var existingById = {};
+    var children = Array.prototype.slice.call(settledList.children);
+    for (var c = 0; c < children.length; c++) {
+      var k = children[c].getAttribute('data-item-id');
+      if (k) existingById[k] = children[c];
+    }
+
+    var seenIds = {};
+    for (var i = 0; i < state.items.length; i++) {
+      var item = state.items[i];
+      var itemId = String(item.id || ('idx-' + i));
+      seenIds[itemId] = true;
+      var sig = computeSettledItemSig(item);
+      var node = existingById[itemId];
+      if (!node) {
+        node = document.createElement('div');
+        node.className = 'aras-settled-entry';
+        node.setAttribute('data-item-id', itemId);
+        node.setAttribute('data-sig', sig);
+        node.innerHTML = renderSingleSettledItemHtml(item);
+      } else if (node.getAttribute('data-sig') !== sig) {
+        node.setAttribute('data-sig', sig);
+        node.innerHTML = renderSingleSettledItemHtml(item);
+      }
+
+      var currentAtPos = settledList.children[i] || null;
+      if (currentAtPos !== node) {
+        settledList.insertBefore(node, currentAtPos);
+      }
+    }
+
+    for (var oldKey in existingById) {
+      if (Object.prototype.hasOwnProperty.call(existingById, oldKey) && !seenIds[oldKey]) {
+        var stale = existingById[oldKey];
+        if (stale && stale.parentNode === settledList) {
+          settledList.removeChild(stale);
+        }
+      }
+    }
+  }
+
+  function syncLiveSlotNow() {
+    var liveSlot = document.getElementById('aras-live-slot');
+    if (!liveSlot) return;
 
     if (state.liveStream) {
       var ls = state.liveStream;
-      parts.push('<div class="aras-msg-row"><div class="aras-msg-assistant">');
-      parts.push('<div class="aras-msg-meta"><span style="display:inline-flex;align-items:center;gap:6px;"><span class="aras-pulse-dot"></span><span>در حال تولید پاسخ...</span></span><span>گام ' + toPersianNumber(ls.step + 1) + '</span></div>');
-      if (ls.reasoning) {
-        var autoExpandReasoning = !ls.text;
-        parts.push(renderReasoningCardHtml(ls.reasoning, 'live-' + ls.attemptId, autoExpandReasoning));
+      var attemptId = String(ls.attemptId || 'live');
+      var card = liveSlot.querySelector('.aras-live-card');
+      if (!card || card.getAttribute('data-attempt-id') !== attemptId) {
+        liveSlot.innerHTML =
+          '<div class="aras-msg-row aras-live-card" data-attempt-id="' + escapeHtml(attemptId) + '">' +
+            '<div class="aras-msg-assistant">' +
+              '<div class="aras-msg-meta">' +
+                '<span style="display:inline-flex;align-items:center;gap:6px;"><span class="aras-pulse-dot"></span><span>در حال تولید پاسخ...</span></span>' +
+                '<span class="aras-live-step"></span>' +
+              '</div>' +
+              '<div class="aras-live-reasoning-wrap" style="display:none;"></div>' +
+              '<div class="aras-live-tools-wrap" style="display:none;"></div>' +
+              '<div class="aras-md aras-live-md" style="display:none;"></div>' +
+            '</div>' +
+          '</div>';
+        card = liveSlot.querySelector('.aras-live-card');
       }
-      if (ls.toolCalls && ls.toolCalls.length > 0) {
-        for (var tc = 0; tc < ls.toolCalls.length; tc++) {
-          var liveTool = ls.toolCalls[tc];
-          parts.push(renderToolCardHtml({
-            callId: liveTool.id,
-            name: liveTool.name || 'tool',
-            argumentsText: liveTool.argumentsText || '',
-            status: 'running'
-          }, 'tool-' + liveTool.id));
+      if (!card) return;
+
+      var stepEl = card.querySelector('.aras-live-step');
+      var stepText = 'گام ' + toPersianNumber((ls.step || 0) + 1);
+      if (stepEl && stepEl.textContent !== stepText) {
+        stepEl.textContent = stepText;
+      }
+
+      /* In-place Reasoning update without destroying the collapsible card */
+      var rWrap = card.querySelector('.aras-live-reasoning-wrap');
+      if (rWrap) {
+        if (ls.reasoning && ls.reasoning.trim()) {
+          rWrap.style.display = '';
+          var rKey = 'live-' + attemptId;
+          var rCard = rWrap.querySelector('.aras-collapse-card.reasoning');
+          if (!rCard) {
+            rWrap.innerHTML = renderReasoningCardHtml(ls.reasoning, rKey, !ls.text);
+            rCard = rWrap.querySelector('.aras-collapse-card.reasoning');
+          } else {
+            var rTextEl = rCard.querySelector('.aras-reasoning-text');
+            if (rTextEl && rTextEl.textContent !== ls.reasoning) {
+              rTextEl.textContent = ls.reasoning;
+            }
+            var userToggled = state.userToggledReasoning[rKey];
+            var shouldOpen = userToggled !== undefined ? userToggled : !ls.text;
+            rCard.classList.toggle('open', shouldOpen);
+          }
+        } else {
+          rWrap.style.display = 'none';
         }
       }
-      if (ls.text) {
-        parts.push('<div class="aras-md">' + renderMarkdown(ls.text) + '</div>');
+
+      /* In-place Live Tool Calls update only when toolCalls signature changes */
+      var tWrap = card.querySelector('.aras-live-tools-wrap');
+      if (tWrap) {
+        if (ls.toolCalls && ls.toolCalls.length > 0) {
+          var tSig = '';
+          for (var tc = 0; tc < ls.toolCalls.length; tc++) {
+            var lt = ls.toolCalls[tc];
+            tSig += lt.id + ':' + (lt.name || '') + ':' + (lt.argumentsText || '').length + ':' + (state.openCards['tool-' + lt.id] ? '1' : '0') + ';';
+          }
+          tWrap.style.display = 'flex';
+          tWrap.style.flexDirection = 'column';
+          tWrap.style.gap = '8px';
+          if (tWrap.getAttribute('data-tools-sig') !== tSig) {
+            tWrap.setAttribute('data-tools-sig', tSig);
+            var tHtml = '';
+            for (var ti = 0; ti < ls.toolCalls.length; ti++) {
+              var liveTool = ls.toolCalls[ti];
+              tHtml += renderToolCardHtml({
+                callId: liveTool.id,
+                name: liveTool.name || 'tool',
+                argumentsText: liveTool.argumentsText || '',
+                status: 'running'
+              }, 'tool-' + liveTool.id);
+            }
+            tWrap.innerHTML = tHtml;
+          }
+        } else {
+          tWrap.style.display = 'none';
+        }
       }
-      parts.push('</div></div>');
-    } else if (state.sessionStatus === 'running') {
-      parts.push('<div class="aras-msg-row"><div class="aras-msg-assistant"><div style="display:inline-flex;align-items:center;gap:8px;color:var(--text-secondary);font-size:13px;"><span class="aras-pulse-dot"></span><span>ارکستریتور در حال پردازش است...</span></div></div></div>');
+
+      /* In-place Live Markdown update only when text changed */
+      var mdEl = card.querySelector('.aras-live-md');
+      if (mdEl) {
+        if (ls.text) {
+          if (mdEl._lastRawText !== ls.text) {
+            mdEl.style.display = '';
+            mdEl._lastRawText = ls.text;
+            mdEl.innerHTML = renderMarkdown(ls.text);
+          }
+        } else {
+          mdEl.style.display = 'none';
+          mdEl._lastRawText = '';
+        }
+      }
+      return;
     }
 
+    if (state.sessionStatus === 'running') {
+      if (!liveSlot.querySelector('[data-orchestrator-idle="1"]')) {
+        liveSlot.innerHTML = '<div class="aras-msg-row" data-orchestrator-idle="1"><div class="aras-msg-assistant"><div style="display:inline-flex;align-items:center;gap:8px;color:var(--text-secondary);font-size:13px;"><span class="aras-pulse-dot"></span><span>ارکستریتور در حال پردازش است...</span></div></div></div>';
+      }
+      return;
+    }
+
+    if (liveSlot.innerHTML !== '') {
+      liveSlot.innerHTML = '';
+    }
+  }
+
+  function syncInteractiveSlot() {
+    var slot = document.getElementById('aras-interactive-slot');
+    if (!slot) return;
+    var sigParts = [];
     for (var a = 0; a < state.pendingApprovals.length; a++) {
-      parts.push(renderApprovalCardHtml(state.pendingApprovals[a]));
+      sigParts.push('a:' + state.pendingApprovals[a].requestId);
     }
     for (var q = 0; q < state.pendingQuestions.length; q++) {
-      parts.push(renderQuestionCardHtml(state.pendingQuestions[q]));
+      sigParts.push('q:' + state.pendingQuestions[q].requestId);
     }
+    var sig = sigParts.join('|');
+    if (slot.getAttribute('data-sig') === sig) return;
+    slot.setAttribute('data-sig', sig);
 
-    transcriptEl.innerHTML = parts.join('');
+    var html = '';
+    for (var ai = 0; ai < state.pendingApprovals.length; ai++) {
+      html += renderApprovalCardHtml(state.pendingApprovals[ai]);
+    }
+    for (var qi = 0; qi < state.pendingQuestions.length; qi++) {
+      html += renderQuestionCardHtml(state.pendingQuestions[qi]);
+    }
+    slot.innerHTML = html;
+  }
+
+  var liveRafId = 0;
+  var pendingLiveAutoScroll = false;
+
+  function scheduleLiveSlotSync(autoScroll) {
+    if (autoScroll) pendingLiveAutoScroll = true;
+    if (liveRafId) return;
+    var scheduleFn = (typeof window !== 'undefined' && window.requestAnimationFrame)
+      ? window.requestAnimationFrame
+      : function (cb) { return setTimeout(cb, 16); };
+    liveRafId = scheduleFn(function () {
+      liveRafId = 0;
+      var wantScroll = pendingLiveAutoScroll;
+      pendingLiveAutoScroll = false;
+      var scrollContainer = document.getElementById('aras-chat-scroll');
+      var stick = wantScroll && isScrolledNearBottom(scrollContainer);
+      syncChatHeaderAndHero();
+      syncLiveSlotNow();
+      if (stick && scrollContainer) {
+        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      }
+    });
+  }
+
+  function renderChatSurface(scrollToBottom) {
+    var scrollContainer = document.getElementById('aras-chat-scroll');
+    var wasNearBottom = isScrolledNearBottom(scrollContainer);
+
+    syncChatHeaderAndHero();
+    syncSettledItems();
+    syncLiveSlotNow();
+    syncInteractiveSlot();
     syncComposerButtonState();
 
-    if (scrollToBottom) {
+    if (scrollContainer && (scrollToBottom === 'force' || (scrollToBottom && wasNearBottom))) {
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
     }
   }
@@ -433,12 +886,18 @@ export const ARAS_UI_SCRIPT = `
     if (state.sessionStatus === 'running') {
       btn.className = 'aras-send-btn running';
       btn.title = 'توقف تولید پاسخ';
-      btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
+      if (btn.getAttribute('data-btn-mode') !== 'stop') {
+        btn.setAttribute('data-btn-mode', 'stop');
+        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
+      }
     } else {
       var hasContent = input.value.trim().length > 0 || state.stagedImages.length > 0;
       btn.className = 'aras-send-btn' + (hasContent ? ' ready' : '');
       btn.title = 'ارسال پیام';
-      btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>';
+      if (btn.getAttribute('data-btn-mode') !== 'send') {
+        btn.setAttribute('data-btn-mode', 'send');
+        btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/></svg>';
+      }
     }
   }
 
@@ -576,7 +1035,8 @@ export const ARAS_UI_SCRIPT = `
           var mod = grp.models[m];
           var val = grp.id + '::' + mod.id;
           var selected = (snap.defaultModel.provider === grp.id && snap.defaultModel.model === mod.id) ? ' selected' : '';
-          html += '<option value="' + escapeHtml(val) + '"' + selected + '>' + escapeHtml(mod.name + ' (' + mod.id + ')') + '</option>';
+          var defEff = mod.defaultEffort || '';
+          html += '<option value="' + escapeHtml(val) + '" data-default-effort="' + escapeHtml(defEff) + '"' + selected + '>' + escapeHtml(mod.name + ' (' + mod.id + ')') + '</option>';
         }
         html += '</optgroup>';
       }
@@ -648,14 +1108,22 @@ export const ARAS_UI_SCRIPT = `
     }
 
     html += '<div style="border-top:1px solid var(--border-subtle);padding-top:12px;margin-top:6px;">';
-    html += '<div style="font-weight:700;font-size:13px;margin-bottom:8px;">افزودن یا ویرایش ارائه‌دهنده جدید (OpenAI / Anthropic / OpenRouter / Local LLM)</div>';
+    html += '<div style="font-weight:700;font-size:13px;margin-bottom:8px;">فعال‌سازی سریع ارائه‌دهندگان استاندارد (یک کلیک):</div>';
+    html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;">';
+    html += '<button type="button" class="aras-btn" data-quick-provider="openrouter" data-quick-name="OpenRouter" data-quick-key="OPENROUTER_API_KEY">+ فعال‌سازی OpenRouter</button>';
+    html += '<button type="button" class="aras-btn" data-quick-provider="google" data-quick-name="Google Gemini" data-quick-key="GEMINI_API_KEY">+ فعال‌سازی Google Gemini</button>';
+    html += '<button type="button" class="aras-btn" data-quick-provider="groq" data-quick-name="Groq" data-quick-key="GROQ_API_KEY">+ فعال‌سازی Groq</button>';
+    html += '<button type="button" class="aras-btn" data-quick-provider="openai" data-quick-name="OpenAI" data-quick-key="OPENAI_API_KEY">+ فعال‌سازی OpenAI</button>';
+    html += '<button type="button" class="aras-btn" data-quick-provider="anthropic" data-quick-name="Anthropic Claude" data-quick-key="ANTHROPIC_API_KEY">+ فعال‌سازی Anthropic</button>';
+    html += '</div>';
+    html += '<div style="font-weight:700;font-size:13px;margin-bottom:8px;">افزودن یا ویرایش ارائه‌دهنده سفارشی (OpenRouter / Gemini / Groq / Local LLM)</div>';
     html += '<div class="aras-form-grid">';
-    html += '<div class="aras-field"><label>شناسه مسیر (مثلاً openai، anthropic یا local-vllm)</label><input id="aras-cp-id" class="aras-input ltr" placeholder="openai" /></div>';
-    html += '<div class="aras-field"><label>نام نمایشی</label><input id="aras-cp-name" class="aras-input" placeholder="OpenAI / درگاه سازمانی" /></div>';
-    html += '<div class="aras-field"><label>پروتکل API</label><select id="aras-cp-api" class="aras-select ltr"><option value="openai-completions">openai-completions</option><option value="openai-responses">openai-responses</option><option value="anthropic-messages">anthropic-messages</option></select></div>';
-    html += '<div class="aras-field"><label>نشانی Base URL (اختیاری برای ارائه‌دهندگان استاندارد)</label><input id="aras-cp-url" class="aras-input ltr" placeholder="https://api.openai.com/v1" /></div>';
-    html += '<div class="aras-field"><label>نام متغیر کلید API</label><input id="aras-cp-keyenv" class="aras-input ltr" placeholder="OPENAI_API_KEY" /></div>';
-    html += '<div class="aras-field"><label>فهرست مدل‌ها با کاما (اختیاری — مثلاً gpt-4o,o3-mini)</label><input id="aras-cp-models" class="aras-input ltr" placeholder="gpt-4o, gpt-4.1-mini" /></div>';
+    html += '<div class="aras-field"><label>شناسه مسیر (مثلاً openrouter، google، groq، openai یا local-vllm)</label><input id="aras-cp-id" class="aras-input ltr" placeholder="openrouter" /></div>';
+    html += '<div class="aras-field"><label>نام نمایشی</label><input id="aras-cp-name" class="aras-input" placeholder="OpenRouter / درگاه سازمانی" /></div>';
+    html += '<div class="aras-field"><label>پروتکل API</label><select id="aras-cp-api" class="aras-select ltr"><option value="">خودکار از کاتالوگ (برای openrouter / google / groq / openai)</option><option value="openai-completions">openai-completions</option><option value="openai-responses">openai-responses</option><option value="anthropic-messages">anthropic-messages</option></select></div>';
+    html += '<div class="aras-field"><label>نشانی Base URL (خالی بگذارید تا پیش‌فرض استاندارد استفاده شود)</label><input id="aras-cp-url" class="aras-input ltr" placeholder="اختیاری برای ارائه‌دهندگان استاندارد" /></div>';
+    html += '<div class="aras-field"><label>نام متغیر کلید API</label><input id="aras-cp-keyenv" class="aras-input ltr" placeholder="OPENROUTER_API_KEY" /></div>';
+    html += '<div class="aras-field"><label>فهرست مدل‌ها با کاما (خالی = دریافت کل کاتالوگ مدل‌ها)</label><input id="aras-cp-models" class="aras-input ltr" placeholder="اختیاری — خالی بگذارید تا همه مدل‌ها اضافه شوند" /></div>';
     html += '</div>';
     html += '<div style="margin-top:10px;"><button type="button" class="aras-btn primary" id="aras-save-cp-btn">ثبت ارائه‌دهنده</button></div>';
     html += '</div></div>';
@@ -697,7 +1165,7 @@ export const ARAS_UI_SCRIPT = `
     if (ev.type === 'session.updated' && ev.session) {
       if (state.currentSessionId === ev.session.id) {
         state.currentSessionTitle = ev.session.title;
-        renderChatSurface(false);
+        syncChatHeaderAndHero();
       }
       return;
     }
@@ -705,10 +1173,10 @@ export const ARAS_UI_SCRIPT = `
     if (!state.currentSessionId || ev.sessionId !== state.currentSessionId) {
       if (ev.type === 'approval.requested' && ev.approval && ev.approval.sessionId === state.currentSessionId) {
         state.pendingApprovals.push(ev.approval);
-        renderChatSurface(true);
+        syncInteractiveSlot();
       } else if (ev.type === 'question.requested' && ev.question && ev.question.sessionId === state.currentSessionId) {
         state.pendingQuestions.push(ev.question);
-        renderChatSurface(true);
+        syncInteractiveSlot();
       }
       return;
     }
@@ -716,13 +1184,18 @@ export const ARAS_UI_SCRIPT = `
     switch (ev.type) {
       case 'session.status':
         state.sessionStatus = ev.status;
-        renderChatSurface(false);
+        syncChatHeaderAndHero();
+        syncLiveSlotNow();
+        syncComposerButtonState();
         break;
       case 'session.error':
+        clearTimeout(state._streamEndTimer);
+        state.liveStream = null;
         state.items.push({ kind: 'error', id: 'err-' + Date.now(), message: ev.message });
         renderChatSurface(true);
         break;
       case 'stream.start':
+        clearTimeout(state._streamEndTimer);
         state.liveStream = {
           attemptId: ev.attemptId,
           turn: ev.turn,
@@ -731,7 +1204,7 @@ export const ARAS_UI_SCRIPT = `
           text: '',
           toolCalls: []
         };
-        renderChatSurface(true);
+        scheduleLiveSlotSync(true);
         break;
       case 'stream.delta':
         if (!state.liveStream || state.liveStream.attemptId !== ev.attemptId) {
@@ -753,43 +1226,62 @@ export const ARAS_UI_SCRIPT = `
           if (ev.toolName) existingTc.name = ev.toolName;
           if (ev.argumentsDelta) existingTc.argumentsText += ev.argumentsDelta;
         }
-        renderChatSurface(true);
+        scheduleLiveSlotSync(true);
         break;
       case 'stream.end':
-        state.liveStream = null;
-        renderChatSurface(false);
+        if (ev.committed && state.liveStream && state.liveStream.attemptId === ev.attemptId) {
+          /* Hold live card briefly until transcript.item arrives so there is zero blank frame */
+          var endedAttempt = ev.attemptId;
+          clearTimeout(state._streamEndTimer);
+          state._streamEndTimer = setTimeout(function () {
+            if (state.liveStream && state.liveStream.attemptId === endedAttempt) {
+              state.liveStream = null;
+              syncLiveSlotNow();
+            }
+          }, 400);
+        } else {
+          clearTimeout(state._streamEndTimer);
+          state.liveStream = null;
+          syncLiveSlotNow();
+        }
         break;
       case 'transcript.item':
+        clearTimeout(state._streamEndTimer);
+        if (ev.item && ev.item.kind === 'assistant') {
+          state.liveStream = null;
+        }
         var dup = false;
         for (var k = 0; k < state.items.length; k++) {
           if (state.items[k].id === ev.item.id) { state.items[k] = ev.item; dup = true; break; }
         }
         if (!dup) state.items.push(ev.item);
-        renderChatSurface(true);
+        renderChatSurface(ev.item && ev.item.kind === 'user' ? 'force' : true);
         break;
       case 'tool.call':
         attachOrUpdateTool(ev.turn, ev.step, ev.tool);
-        renderChatSurface(true);
+        syncSettledItems();
         break;
       case 'tool.result':
         updateToolResult(ev.callId, ev.status, ev.resultText, ev.errorReason);
-        renderChatSurface(false);
+        syncSettledItems();
         break;
       case 'approval.requested':
         state.pendingApprovals.push(ev.approval);
+        syncInteractiveSlot();
         renderChatSurface(true);
         break;
       case 'approval.resolved':
         state.pendingApprovals = state.pendingApprovals.filter(function (x) { return x.requestId !== ev.requestId; });
-        renderChatSurface(false);
+        syncInteractiveSlot();
         break;
       case 'question.requested':
         state.pendingQuestions.push(ev.question);
+        syncInteractiveSlot();
         renderChatSurface(true);
         break;
       case 'question.resolved':
         state.pendingQuestions = state.pendingQuestions.filter(function (x) { return x.requestId !== ev.requestId; });
-        renderChatSurface(false);
+        syncInteractiveSlot();
         break;
     }
   }
@@ -896,6 +1388,19 @@ export const ARAS_UI_SCRIPT = `
       var idx = Number(removeImgBtn.getAttribute('data-remove-img'));
       state.stagedImages.splice(idx, 1);
       renderAttachmentStrip();
+      return;
+    }
+
+    var copyCodeBtn = target.closest('[data-copy-code]');
+    if (copyCodeBtn) {
+      var codeWrap = copyCodeBtn.closest('.aras-code-block');
+      var codeNode = codeWrap ? codeWrap.querySelector('code') : null;
+      var rawCode = codeNode ? (codeNode.textContent || '') : '';
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(rawCode).then(function () {
+          showToast('کد در حافظه کپی شد.');
+        }).catch(function () {});
+      }
       return;
     }
 
@@ -1051,6 +1556,28 @@ export const ARAS_UI_SCRIPT = `
       return;
     }
 
+    var quickProv = target.closest('[data-quick-provider]');
+    if (quickProv) {
+      var qId = quickProv.getAttribute('data-quick-provider') || '';
+      var qName = quickProv.getAttribute('data-quick-name') || qId;
+      var qKey = quickProv.getAttribute('data-quick-key') || '';
+      try {
+        await apiFetch('/aras-api/settings/providers/custom', {
+          method: 'POST',
+          body: {
+            id: qId,
+            displayName: qName,
+            apiKeyEnv: qKey
+          }
+        });
+        showToast('ارائه‌دهنده ' + qName + ' فعال شد و مدل‌های آن به فهرست اضافه شدند.');
+        await loadSettings();
+      } catch (err) {
+        showToast(err.message);
+      }
+      return;
+    }
+
     if (target.closest('#aras-save-cp-btn')) {
       var cpId = document.getElementById('aras-cp-id');
       var cpName = document.getElementById('aras-cp-name');
@@ -1072,7 +1599,7 @@ export const ARAS_UI_SCRIPT = `
           body: {
             id: cpId ? cpId.value : '',
             displayName: cpName ? cpName.value : '',
-            api: cpApi ? cpApi.value : 'openai-completions',
+            api: cpApi ? cpApi.value : '',
             baseURL: cpUrl ? cpUrl.value : '',
             apiKeyEnv: cpKey ? cpKey.value : '',
             models: modelList
@@ -1133,8 +1660,13 @@ export const ARAS_UI_SCRIPT = `
         var mod = val.slice(idx + 2);
         var pInp = document.getElementById('aras-manual-provider');
         var mInp = document.getElementById('aras-manual-model');
+        var eInp = document.getElementById('aras-model-effort');
         if (pInp) pInp.value = prov;
         if (mInp) mInp.value = mod;
+        var selOpt = target.selectedOptions && target.selectedOptions[0];
+        if (eInp && selOpt) {
+          eInp.value = selOpt.getAttribute('data-default-effort') || '';
+        }
       }
       return;
     }
