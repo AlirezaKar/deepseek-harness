@@ -17,7 +17,17 @@ import {
   createArasFallbackHandler,
   renderArasIndexHtml,
 } from '../src/index.ts'
-import { normalizeHttpProxyUrl, parseWindowsProxyServerValue } from '../src/network.ts'
+import {
+  normalizeProviderBaseUrl,
+  normalizeProviderHeaders,
+  normalizeProviderModels,
+} from '../src/bridge.ts'
+import {
+  isPrivateNetworkHost,
+  normalizeHttpProxyUrl,
+  parseWindowsProxyServerValue,
+  withCustomProviderBypass,
+} from '../src/network.ts'
 import { ARAS_UI_SCRIPT } from '../src/ui-script.ts'
 
 describe('@deepseek-ai/dsh-aras-ui', () => {
@@ -506,5 +516,181 @@ describe('@deepseek-ai/dsh-aras-ui', () => {
     unsub()
     unsubQ()
     unsubDel()
+  })
+
+  it('accepts arbitrary provider base URLs and preserves stored fields when editing', async () => {
+    // Pure helpers: any host is canonicalized, blanks/dupes are dropped.
+    expect(normalizeProviderBaseUrl('http://192.168.1.50:8000/v1')).toBe('http://192.168.1.50:8000/v1')
+    expect(normalizeProviderBaseUrl('https://Gw.Test/openai/v1/')).toBe('https://gw.test/openai/v1')
+    expect(normalizeProviderBaseUrl('192.168.1.50:8000/v1')).toBe('https://192.168.1.50:8000/v1')
+    expect(normalizeProviderBaseUrl('http://127.0.0.1:11434/v1/')).toBe('http://127.0.0.1:11434/v1')
+    expect(() => normalizeProviderBaseUrl('ftp://gw.test/v1')).toThrow(/پشتیبانی نمی‌شود/u)
+    expect(() => normalizeProviderBaseUrl('   ')).toThrow(/نمی‌تواند خالی/u)
+
+    expect(normalizeProviderModels([
+      { id: ' m1 ', name: 'One' },
+      { id: 'm1', name: 'duplicate' },
+      { id: '  ' },
+      { id: 'm2', contextWindow: 32768, maxTokens: 4096, input: ['text', 'image', 'text'], tools: true },
+    ])).toEqual([
+      { id: 'm1', name: 'One' },
+      { id: 'm2', contextWindow: 32768, maxTokens: 4096, input: ['text', 'image'], tools: true },
+    ])
+
+    expect(normalizeProviderHeaders({ ' X-Title ': ' Aras ', '': 'x', 'Empty': '  ' })).toEqual({
+      'X-Title': 'Aras',
+    })
+
+    const tempRoot = await mkdtemp(join(tmpdir(), 'aras-provider-test-'))
+    const previousDshHome = process.env.DSH_HOME
+    process.env.DSH_HOME = tempRoot
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+
+    const nsStore = new Map<string, Record<string, unknown>>()
+    ctx.provide('settings', {
+      writable: true,
+      describe: () => [...nsStore.entries()].map(([ns, value]) => ({ ns, value })),
+      mutate: async (ns: unknown, ops: readonly SettingsPathOp[]) => {
+        const key = String(ns)
+        const current = structuredClone(nsStore.get(key) ?? {})
+        for (const op of ops) {
+          let cursor: Record<string, unknown> = current
+          for (let i = 0; i < op.path.length - 1; i++) {
+            const seg = op.path[i]!
+            if (typeof cursor[seg] !== 'object' || cursor[seg] === null) cursor[seg] = {}
+            cursor = cursor[seg] as Record<string, unknown>
+          }
+          const leaf = op.path[op.path.length - 1]!
+          if (op.op === 'set') cursor[leaf] = op.value
+          else delete cursor[leaf]
+        }
+        nsStore.set(key, current)
+      },
+    } as never)
+
+    const bridge = new ArasHostBridge(ctx, { defaultApprovalPolicy: 'ask', defaultCwd: tempRoot })
+    const apiHandler = createArasApiHandler(bridge)
+    const server = createServer((req, res) => void apiHandler(req, res))
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+    const serverPort = (server.address() as AddressInfo).port
+    const baseUrl = `http://127.0.0.1:${String(serverPort)}`
+
+    cleanups.push(async () => {
+      await bridge.dispose()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await ctx.fiber.dispose()
+      await rm(tempRoot, { recursive: true, force: true })
+      if (previousDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousDshHome
+    })
+
+    const postProvider = async (body: Record<string, unknown>): Promise<Response> =>
+      await fetch(`${baseUrl}/aras-api/settings/providers/custom`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    const stored = (): Record<string, unknown> =>
+      (nsStore.get('llm-pi-ai')?.providers ?? {}) as Record<string, unknown>
+
+    // 1. A hand-declared route at an arbitrary LAN endpoint is accepted.
+    const lanRes = await postProvider({
+      id: 'my-gateway',
+      displayName: 'Corporate Gateway',
+      api: 'openai-completions',
+      baseURL: 'http://192.168.1.50:8000/v1',
+      apiKeyEnv: 'MY_GATEWAY_KEY',
+      models: ['qwen2.5-72b', 'llama-3.3-70b'],
+      headers: { 'X-Title': 'Aras' },
+      defaultContextWindow: 32768,
+      defaultMaxTokens: 4096,
+      defaultInput: ['text', 'image'],
+    })
+    expect(lanRes.status).toBe(200)
+    expect(stored()['my-gateway']).toMatchObject({
+      api: 'openai-completions',
+      baseURL: 'http://192.168.1.50:8000/v1',
+      apiKeyEnv: 'MY_GATEWAY_KEY',
+      models: [{ id: 'qwen2.5-72b' }, { id: 'llama-3.3-70b' }],
+      headers: { 'X-Title': 'Aras' },
+      defaultContextWindow: 32768,
+      defaultMaxTokens: 4096,
+      defaultInput: ['text', 'image'],
+    })
+
+    // 2. Editing one field must not erase the others (the regression this fixes).
+    expect((await postProvider({ id: 'my-gateway', displayName: 'Renamed Gateway' })).status).toBe(200)
+    expect(stored()['my-gateway']).toMatchObject({
+      displayName: 'Renamed Gateway',
+      api: 'openai-completions',
+      baseURL: 'http://192.168.1.50:8000/v1',
+      apiKeyEnv: 'MY_GATEWAY_KEY',
+      models: [{ id: 'qwen2.5-72b' }, { id: 'llama-3.3-70b' }],
+      headers: { 'X-Title': 'Aras' },
+      defaultContextWindow: 32768,
+      defaultInput: ['text', 'image'],
+    })
+
+    // 3. The endpoint may move to any other host, including a loopback port.
+    expect((await postProvider({ id: 'my-gateway', baseURL: 'http://127.0.0.1:11434/v1/' })).status).toBe(200)
+    expect(stored()['my-gateway']).toMatchObject({ baseURL: 'http://127.0.0.1:11434/v1' })
+
+    // 4. An unsupported protocol is refused with the supported list named.
+    const badApi = await postProvider({ id: 'my-gateway', api: 'grpc-magic' })
+    expect(badApi.status).toBeGreaterThanOrEqual(400)
+    expect((await badApi.json() as { error: string }).error).toMatch(/پشتیبانی نمی‌شود/u)
+    expect(stored()['my-gateway']).toMatchObject({ api: 'openai-completions' })
+
+    // 5. A malformed endpoint is refused rather than persisted.
+    expect((await postProvider({ id: 'my-gateway', baseURL: 'ftp://gw.test/v1' })).status).toBeGreaterThanOrEqual(400)
+    expect(stored()['my-gateway']).toMatchObject({ baseURL: 'http://127.0.0.1:11434/v1' })
+
+    // 6. Settings snapshot surfaces the declared route with its endpoint and health.
+    const snapshot = (await (await fetch(`${baseUrl}/aras-api/settings`)).json()) as {
+      customProviders: Array<Record<string, unknown>>
+      supportedProtocols: string[]
+      catalogRouteModels: Record<string, string[]>
+    }
+    expect(snapshot.supportedProtocols).toEqual([
+      'openai-completions', 'openai-responses', 'anthropic-messages',
+    ])
+    expect(Array.isArray(snapshot.supportedProtocols)).toBe(true)
+    expect(snapshot.catalogRouteModels).toBeTypeOf('object')
+    const gatewayView = snapshot.customProviders.find(item => item.id === 'my-gateway')
+    expect(gatewayView).toMatchObject({
+      displayName: 'Renamed Gateway',
+      api: 'openai-completions',
+      baseURL: 'http://127.0.0.1:11434/v1',
+      declared: true,
+    })
+    // No `llm` service is mounted in this fixture, so nothing serves the route yet.
+    expect(gatewayView).toHaveProperty('serviceable', false)
+
+    // 7. A private provider endpoint bypasses the outbound proxy (a LAN gateway
+    //    routed through a corporate tunnel is exactly what returns a proxy 403).
+    expect(isPrivateNetworkHost('192.168.1.50')).toBe(true)
+    expect(isPrivateNetworkHost('127.0.0.1')).toBe(true)
+    expect(isPrivateNetworkHost('10.1.2.3')).toBe(true)
+    expect(isPrivateNetworkHost('api.openai.com')).toBe(false)
+    expect(isPrivateNetworkHost('8.8.8.8')).toBe(false)
+    const bypassed = withCustomProviderBypass('localhost,127.0.0.1', [
+      'http://192.168.1.50:8000/v1',
+      'https://openrouter.ai/api/v1',
+    ])
+    expect(bypassed).toContain('192.168.1.50')
+    expect(bypassed).not.toContain('openrouter.ai')
+    // The live proxy status reflects the declared LAN endpoint, not just loopback.
+    // Steps above moved this route to 127.0.0.1, so point it back at the LAN host first.
+    expect((await postProvider({ id: 'my-gateway', baseURL: 'http://192.168.1.50:8000/v1' })).status).toBe(200)
+    const netAfterProvider = (await (await fetch(`${baseUrl}/aras-api/settings`)).json()) as {
+      network: { noProxy: string }
+    }
+    expect(netAfterProvider.network.noProxy).toContain('192.168.1.50')
+
+    // 8. Deleting the route removes it.
+    const removed = await fetch(`${baseUrl}/aras-api/settings/providers/custom/my-gateway`, { method: 'DELETE' })
+    expect(removed.status).toBe(200)
+    expect(stored()['my-gateway']).toBeUndefined()
   })
 })

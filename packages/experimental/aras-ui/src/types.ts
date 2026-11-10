@@ -162,14 +162,63 @@ export interface ArasProviderCatalogGroup {
   readonly models: readonly ArasModelEntry[]
 }
 
-/** Custom or multi-provider gateway profile stored under `llm-pi-ai`. */
+/**
+ * Wire protocols a hand-declared route may speak, mirroring
+ * `supportedProtocols()` in `@deepseek-ai/dsh-llm-pi-ai`. A route the installed
+ * catalog does not describe must name one of these.
+ */
+export const ARAS_SUPPORTED_PROTOCOLS = [
+  'openai-completions',
+  'openai-responses',
+  'anthropic-messages',
+] as const
+
+/** One wire protocol a configured route can speak. */
+export type ArasProviderProtocol = typeof ARAS_SUPPORTED_PROTOCOLS[number]
+
+/** A model listed on a hand-declared provider route. */
+export interface ArasProviderModelEntry {
+  readonly id: string
+  readonly name?: string
+  /** Context window in tokens; omitted uses the route default. */
+  readonly contextWindow?: number
+  /** Output cap in tokens; omitted uses the route default. */
+  readonly maxTokens?: number
+  /** Input modalities; omitted uses the route default. */
+  readonly input?: readonly ('text' | 'image')[]
+  /** Whether the model can call tools; omitted lets the protocol decide. */
+  readonly tools?: boolean
+  /** Whether the model accepts thinking/reasoning budgets. */
+  readonly reasoning?: boolean
+}
+
+/**
+ * Settings view of a provider route stored under `llm-pi-ai`. Any endpoint the
+ * profile declares is served as-is: the route key does not have to name an
+ * installed pi-ai provider, so arbitrary base URLs are configurable.
+ */
 export interface ArasCustomProviderProfile {
   readonly id: string
   readonly displayName: string
+  /** Declared wire protocol, or `''` when the profile defers to the installed catalog. */
   readonly api: string
+  /** Declared endpoint, or `''` when the profile defers to the installed catalog. */
   readonly baseURL: string
   readonly apiKeyEnv: string
-  readonly models: readonly { readonly id: string; readonly name: string }[]
+  /** Models the profile lists explicitly; empty when it serves the installed catalog. */
+  readonly models: readonly ArasProviderModelEntry[]
+  /** Headers declared for this route (secrets already redacted). */
+  readonly headers: Readonly<Record<string, string>>
+  /** Route-level fallbacks applied to models the catalog does not size. */
+  readonly defaultContextWindow?: number
+  readonly defaultMaxTokens?: number
+  readonly defaultInput?: readonly ('text' | 'image')[]
+  /** True when the route names no installed pi-ai provider, so every field above must be declared. */
+  readonly declared: boolean
+  /** Whether the live LLM catalog currently serves at least one model for this route. */
+  readonly serviceable: boolean
+  /** Why the route is not serving models, when `serviceable` is false. */
+  readonly problem?: string
 }
 
 /** Complete settings snapshot consumed by the Aras Settings (`تنظیمات سامانه`) view. */
@@ -188,6 +237,10 @@ export interface ArasSettingsSnapshot {
     readonly reasoningEffort: string
   }
   readonly customProviders: readonly ArasCustomProviderProfile[]
+  /** Wire protocols a hand-declared route may name, in the adapter's preference order. */
+  readonly supportedProtocols: readonly string[]
+  /** Model ids the installed catalog describes for each route, used to validate a hand-declared route. */
+  readonly catalogRouteModels: Readonly<Record<string, readonly string[]>>
   readonly preferences: {
     readonly approvalMode: ArasApprovalMode
     readonly defaultCwd: string

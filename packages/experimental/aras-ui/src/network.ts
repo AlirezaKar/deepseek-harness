@@ -140,6 +140,79 @@ function mergeNoProxy(...lists: readonly (string | undefined)[]): string {
   return ordered.join(',')
 }
 
+/**
+ * Canonicalize one endpoint URL for comparison: lowercase host, keep the port.
+ * @param raw - endpoint such as `http://192.168.1.50:8000/v1`.
+ * @returns the origin (`http://192.168.1.50:8000`), or `undefined` when unparseable.
+ */
+function originOf(raw: string): string | undefined {
+  try {
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//iu.test(raw) ? raw : `https://${raw}`
+    return new URL(withScheme).origin.toLowerCase()
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether a host must bypass the outbound proxy because it is not on the public
+ * internet: loopback, private (RFC 1918 / CGNAT), link-local, and `.local`
+ * mDNS names. A gateway on the operator's own network is reached directly by
+ * definition — pushing it through a corporate tunnel or VPN is what makes an
+ * otherwise valid custom provider fail with a proxy `403`.
+ * @param hostname - URL hostname, with IPv6 brackets already removed.
+ * @returns true when traffic to this host must not traverse a proxy.
+ */
+export function isPrivateNetworkHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/gu, '')
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true
+  if (host === '::1' || host === '::') return true
+  // IPv6 unique-local (fc00::/7) and link-local (fe80::/10).
+  if (/^f[cd][0-9a-f]{2}:/u.test(host) || /^fe[89ab][0-9a-f]:/u.test(host)) return true
+  if (/^::ffff:/u.test(host)) return isPrivateNetworkHost(host.slice('::ffff:'.length))
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host)
+  if (v4 === null) return false
+  const [a, b] = [Number(v4[1]), Number(v4[2])]
+  if (a === 10 || a === 127) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 192 && b === 168) return true
+  if (a === 169 && b === 254) return true
+  if (a === 100 && b >= 64 && b <= 127) return true
+  return false
+}
+
+/**
+ * Add the operator's own custom provider endpoints to a `NO_PROXY` list.
+ *
+ * A LAN gateway declared at `http://192.168.1.50:8000/v1` is not on the public
+ * internet, so an inherited corporate proxy would intercept it and answer
+ * `403 Access denied by security policy`. Listing the exact origin (and any
+ * private host at all) keeps those requests direct while leaving public
+ * provider traffic on the configured tunnel.
+ * @param noProxy - the merged `NO_PROXY` list built so far.
+ * @param customProviderUrls - every `baseURL` declared on a provider route.
+ * @returns the `NO_PROXY` list with private provider origins appended.
+ */
+export function withCustomProviderBypass(noProxy: string, customProviderUrls: readonly string[]): string {
+  const extras: string[] = []
+  for (const raw of customProviderUrls) {
+    const origin = originOf(raw)
+    if (origin === undefined) continue
+    let hostname: string
+    try {
+      hostname = new URL(origin).hostname
+    } catch {
+      continue
+    }
+    if (!isPrivateNetworkHost(hostname)) continue
+    // Both the bare host (matches every port) and the exact origin are useful;
+    // the bare host is what a NO_PROXY consumer compares against.
+    const bare = hostname.replace(/^\[|\]$/gu, '')
+    extras.push(bare, origin)
+  }
+  return extras.length === 0 ? noProxy : mergeNoProxy(noProxy, extras.join(','))
+}
+
 /** Parse Windows `Internet Settings` `ProxyServer` registry value into an HTTP(S) proxy URL. */
 export function parseWindowsProxyServerValue(raw: string): {
   proxyUrl?: string
@@ -343,12 +416,30 @@ export class ArasNetworkController {
 
   private initialized = false
 
+  /** Endpoints declared on custom provider routes, so private ones bypass the proxy. */
+  private customProviderUrls: readonly string[] = []
+
   constructor(homeDir: string = resolveArasDshHome()) {
     this.configPath = join(homeDir, 'aras-network.json')
     // Ensure loopback NO_PROXY is set immediately at construction time.
     const mergedNoProxy = mergeNoProxy(process.env.NO_PROXY, process.env.no_proxy)
     process.env.NO_PROXY = mergedNoProxy
     process.env.no_proxy = mergedNoProxy
+  }
+
+  /**
+   * Record the endpoints declared on custom provider routes.
+   *
+   * Called whenever the provider list is read or written, so a LAN gateway
+   * added through the settings UI immediately bypasses the outbound proxy.
+   * @param urls - every declared `baseURL`, in any order.
+   */
+  async setCustomProviderUrls(urls: readonly string[]): Promise<void> {
+    const next = urls.filter(url => url.trim().length > 0)
+    const changed = next.length !== this.customProviderUrls.length
+      || next.some((url, index) => url !== this.customProviderUrls[index])
+    this.customProviderUrls = next
+    if (changed && this.initialized) await this.reconcile()
   }
 
   /** Load persisted network config (if any) and apply dispatcher + env policy. */
@@ -492,7 +583,10 @@ export class ArasNetworkController {
   }
 
   private async reconcile(): Promise<ArasNetworkStatus> {
-    const noProxy = mergeNoProxy(STARTUP_ENV_PROXY.noProxy, this.config.noProxy)
+    const noProxy = withCustomProviderBypass(
+      mergeNoProxy(STARTUP_ENV_PROXY.noProxy, this.config.noProxy),
+      this.customProviderUrls,
+    )
     const winProxy = await detectWindowsSystemProxy()
 
     let effectiveProxyUrl: string | null = null

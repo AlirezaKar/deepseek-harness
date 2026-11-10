@@ -19,7 +19,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ArasHostBridge } from './bridge.ts'
-import type { ArasApprovalMode, ArasStreamEvent } from './types.ts'
+import type { ArasApprovalMode, ArasProviderModelEntry, ArasStreamEvent } from './types.ts'
 import { renderArasIndexHtml } from './ui-html.ts'
 
 export { ArasHostBridge, buildArasTranscript } from './bridge.ts'
@@ -365,7 +365,9 @@ export function createArasApiHandler(
         return
       }
 
-      // 13. Custom OpenAI-compatible provider upsert/remove (`POST /aras-api/settings/providers/custom`)
+      // 13. Provider route upsert/remove (`POST /aras-api/settings/providers/custom`)
+      //     Any endpoint is accepted: the route key need not name an installed
+      //     pi-ai provider, so LAN gateways and corporate proxies are first-class.
       if (method === 'POST' && pathname === '/aras-api/settings/providers/custom') {
         const body = await readJsonBody(req)
         const id = typeof body.id === 'string' ? body.id : ''
@@ -387,28 +389,28 @@ export function createArasApiHandler(
             ? body.baseUrl
             : undefined
         const apiKeyEnv = typeof body.apiKeyEnv === 'string' ? body.apiKeyEnv : undefined
-        const rawModels = Array.isArray(body.models) ? body.models : []
-        const models: Array<{ id: string; name?: string }> = []
-        for (const m of rawModels) {
-          if (typeof m === 'string' && m.trim().length > 0) {
-            models.push({ id: m.trim() })
-          } else if (typeof m === 'object' && m !== null) {
-            const rec = m as Record<string, unknown>
-            if (typeof rec.id === 'string' && rec.id.trim().length > 0) {
-              models.push({
-                id: rec.id.trim(),
-                ...(typeof rec.name === 'string' && rec.name.trim().length > 0 ? { name: rec.name.trim() } : {}),
-              })
-            }
-          }
-        }
+
+        // Models may arrive as bare ids, a comma-separated string, or full entries.
+        const models = body.models === undefined
+          ? undefined
+          : parseProviderModels(body.models)
+
+        const headers = parseProviderHeaders(body.headers)
+        const defaultInput = parseProviderModalities(body.defaultInput)
+        const defaultContextWindow = parsePositiveInteger(body.defaultContextWindow)
+        const defaultMaxTokens = parsePositiveInteger(body.defaultMaxTokens)
+
         await bridge.upsertCustomProvider({
           id,
           ...(displayName !== undefined ? { displayName } : {}),
           ...(api !== undefined ? { api } : {}),
           ...(baseURL !== undefined ? { baseURL } : {}),
           ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
-          models,
+          ...(models !== undefined ? { models } : {}),
+          ...(headers !== undefined ? { headers } : {}),
+          ...(defaultInput !== undefined ? { defaultInput } : {}),
+          ...(defaultContextWindow !== undefined ? { defaultContextWindow } : {}),
+          ...(defaultMaxTokens !== undefined ? { defaultMaxTokens } : {}),
         })
         const snapshot = await bridge.getSettingsSnapshot()
         sendJson(res, 200, snapshot)
@@ -481,6 +483,72 @@ export function createArasApiHandler(
     },
   })
   return handler
+}
+
+/**
+ * Read a provider model list from request JSON.
+ *
+ * Accepts the three shapes a client may send: bare ids (`["m1"]`), a
+ * comma-separated string (`"m1, m2"`), or full entries that also carry the
+ * per-model capacities and modalities the adapter understands.
+ * @param raw - the `models` member of the request body.
+ * @returns normalized model entries; an explicitly empty list clears the declaration.
+ */
+function parseProviderModels(raw: unknown): ArasProviderModelEntry[] {
+  const texts: unknown[] = typeof raw === 'string' ? raw.split(',') : Array.isArray(raw) ? raw : []
+  const models: ArasProviderModelEntry[] = []
+  for (const item of texts) {
+    if (typeof item === 'string') {
+      const id = item.trim()
+      if (id.length > 0) models.push({ id })
+      continue
+    }
+    if (typeof item !== 'object' || item === null) continue
+    const rec = item as Record<string, unknown>
+    if (typeof rec.id !== 'string' || rec.id.trim().length === 0) continue
+    const contextWindow = parsePositiveInteger(rec.contextWindow)
+    const maxTokens = parsePositiveInteger(rec.maxTokens)
+    const input = parseProviderModalities(rec.input)
+    models.push({
+      id: rec.id.trim(),
+      ...(typeof rec.name === 'string' && rec.name.trim().length > 0 ? { name: rec.name.trim() } : {}),
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+      ...(input === undefined ? {} : { input }),
+      ...(typeof rec.tools === 'boolean' ? { tools: rec.tools } : {}),
+      ...(typeof rec.reasoning === 'boolean' ? { reasoning: rec.reasoning } : {}),
+    })
+  }
+  return models
+}
+
+/** Read a route header map, ignoring non-string values. */
+function parseProviderHeaders(raw: unknown): Record<string, string> | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const headers: Record<string, string> = {}
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'string') headers[name] = value
+  }
+  return headers
+}
+
+/** Read an input-modality list, keeping only the modalities the adapter supports. */
+function parseProviderModalities(raw: unknown): ('text' | 'image')[] | undefined {
+  const list = typeof raw === 'string' ? raw.split(',') : Array.isArray(raw) ? raw : undefined
+  if (list === undefined) return undefined
+  const modalities: ('text' | 'image')[] = []
+  for (const item of list) {
+    if (typeof item !== 'string') continue
+    const value = item.trim()
+    if ((value === 'text' || value === 'image') && !modalities.includes(value)) modalities.push(value)
+  }
+  return modalities
+}
+
+/** Read an optional positive integer field. */
+function parsePositiveInteger(raw: unknown): number | undefined {
+  const value = typeof raw === 'string' ? Number(raw.trim()) : raw
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
 }
 
 /** Build the SPA fallback handler serving the RTL Aras UI shell. */

@@ -31,6 +31,7 @@ export const ARAS_UI_SCRIPT = `
     stagedImages: [],
     sessionsList: [],
     settings: null,
+    editingProvider: null,
     sending: false,
     _eventSource: null,
     _sseConnectedOnce: false
@@ -1257,13 +1258,26 @@ export const ARAS_UI_SCRIPT = `
 
     if (snap.customProviders && snap.customProviders.length > 0) {
       html += '<div style="margin-top:8px;display:flex;flex-direction:column;gap:8px;">';
-      html += '<div style="font-weight:700;font-size:13px;">ارائه‌دهندگان چندگانه ثبت‌شده (pi-ai):</div>';
+      html += '<div style="font-weight:700;font-size:13px;">ارائه‌دهندگان ثبت‌شده (هر درگاهی با هر Base URL):</div>';
       for (var p = 0; p < snap.customProviders.length; p++) {
         var cp = snap.customProviders[p];
         var modelNames = (cp.models || []).map(function (x) { return x.id; }).join(', ');
+        var endpointText = cp.baseURL || 'پیش‌فرض کاتالوگ';
+        var healthBadge = cp.serviceable
+          ? '<span class="aras-provider-badge ok" title="مدل‌های این مسیر در فهرست مدل‌ها فعال است">فعال</span>'
+          : '<span class="aras-provider-badge bad" title="' + escapeHtml(cp.problem || 'هیچ مدلی برای این مسیر بارگذاری نشد') + '">بدون مدل</span>';
         html += '<div class="aras-cred-row">';
-        html += '<div><strong>' + escapeHtml(cp.displayName) + '</strong> <code class="aras-tool-name-code">' + escapeHtml(cp.id) + '</code><div style="font-size:12px;color:var(--text-secondary);direction:ltr;text-align:right;">' + escapeHtml(cp.api) + (cp.baseURL ? ' • ' + escapeHtml(cp.baseURL) : '') + (modelNames ? ' • models: ' + escapeHtml(modelNames) : '') + '</div></div>';
+        html += '<div style="min-width:0;">';
+        html += '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;"><strong>' + escapeHtml(cp.displayName) + '</strong> <code class="aras-tool-name-code">' + escapeHtml(cp.id) + '</code> ' + healthBadge + '</div>';
+        html += '<div style="font-size:12px;color:var(--text-secondary);direction:ltr;text-align:right;word-break:break-all;">' + escapeHtml(cp.api || 'catalog-default') + ' • ' + escapeHtml(endpointText) + (modelNames ? ' • models: ' + escapeHtml(modelNames) : '') + '</div>';
+        if (cp.problem) {
+          html += '<div style="font-size:11.5px;color:var(--warning);margin-top:2px;" dir="auto">' + escapeHtml(cp.problem) + '</div>';
+        }
+        html += '</div>';
+        html += '<div style="display:flex;gap:6px;flex-shrink:0;">';
+        html += '<button type="button" class="aras-btn" data-edit-provider="' + escapeHtml(cp.id) + '">ویرایش</button>';
         html += '<button type="button" class="aras-btn danger" data-remove-provider="' + escapeHtml(cp.id) + '">حذف درگاه</button>';
+        html += '</div>';
         html += '</div>';
       }
       html += '</div>';
@@ -1278,16 +1292,48 @@ export const ARAS_UI_SCRIPT = `
     html += '<button type="button" class="aras-btn" data-quick-provider="openai" data-quick-name="OpenAI" data-quick-key="OPENAI_API_KEY">+ فعال‌سازی OpenAI</button>';
     html += '<button type="button" class="aras-btn" data-quick-provider="anthropic" data-quick-name="Anthropic Claude" data-quick-key="ANTHROPIC_API_KEY">+ فعال‌سازی Anthropic</button>';
     html += '</div>';
-    html += '<div style="font-weight:700;font-size:13px;margin-bottom:8px;">افزودن یا ویرایش ارائه‌دهنده سفارشی (OpenRouter / Gemini / Groq / Local LLM)</div>';
+    html += '<div style="font-weight:700;font-size:13px;margin-bottom:4px;">افزودن یا ویرایش ارائه‌دهنده با Base URL دلخواه</div>';
+    html += '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;" dir="auto">هر درگاهی که با پروتکل OpenAI/Anthropic سازگار باشد پذیرفته می‌شود: Ollama یا vLLM روی شبکه محلی، درگاه سازمانی، Azure، OpenRouter، یا آینه منطقه‌ای. ';
+    html += 'برای مسیرهای استاندارد (openrouter / openai / google / anthropic / groq / xai / mistral / together) می‌توانید پروتکل و Base URL را خالی بگذارید تا از کاتالوگ نصب‌شده استفاده شود؛ ';
+    html += 'برای هر نام دلخواه دیگر، پروتکل، Base URL و فهرست مدل‌ها الزامی است.</div>';
+
+    var pt = snap.supportedProtocols || ['openai-completions', 'openai-responses', 'anthropic-messages'];
     html += '<div class="aras-form-grid">';
-    html += '<div class="aras-field"><label>شناسه مسیر (مثلاً openrouter، google، groq، openai یا local-vllm)</label><input id="aras-cp-id" class="aras-input ltr" placeholder="openrouter" /></div>';
-    html += '<div class="aras-field"><label>نام نمایشی</label><input id="aras-cp-name" class="aras-input" placeholder="OpenRouter / درگاه سازمانی" /></div>';
-    html += '<div class="aras-field"><label>پروتکل API</label><select id="aras-cp-api" class="aras-select ltr"><option value="">خودکار از کاتالوگ (برای openrouter / google / groq / openai)</option><option value="openai-completions">openai-completions</option><option value="openai-responses">openai-responses</option><option value="anthropic-messages">anthropic-messages</option></select></div>';
-    html += '<div class="aras-field"><label>نشانی Base URL (خالی بگذارید تا پیش‌فرض استاندارد استفاده شود)</label><input id="aras-cp-url" class="aras-input ltr" placeholder="اختیاری برای ارائه‌دهندگان استاندارد" /></div>';
-    html += '<div class="aras-field"><label>نام متغیر کلید API</label><input id="aras-cp-keyenv" class="aras-input ltr" placeholder="OPENROUTER_API_KEY" /></div>';
-    html += '<div class="aras-field"><label>فهرست مدل‌ها با کاما (خالی = دریافت کل کاتالوگ مدل‌ها)</label><input id="aras-cp-models" class="aras-input ltr" placeholder="اختیاری — خالی بگذارید تا همه مدل‌ها اضافه شوند" /></div>';
+    html += '<div class="aras-field"><label>شناسه مسیر (حروف کوچک، عدد، خط تیره)</label><input id="aras-cp-id" class="aras-input ltr" placeholder="my-gateway" autocomplete="off" /></div>';
+    html += '<div class="aras-field"><label>نام نمایشی</label><input id="aras-cp-name" class="aras-input" placeholder="درگاه سازمانی / Ollama محلی" /></div>';
+    html += '<div class="aras-field"><label>پروتکل API</label><select id="aras-cp-api" class="aras-select ltr"><option value="">خودکار از کاتالوگ (فقط مسیرهای استاندارد)</option>';
+    for (var pi = 0; pi < pt.length; pi++) {
+      html += '<option value="' + escapeHtml(pt[pi]) + '">' + escapeHtml(pt[pi]) + '</option>';
+    }
+    html += '</select></div>';
+    html += '<div class="aras-field"><label>نشانی Base URL (هر میزبان و پورتی)</label>';
+    html += '<input id="aras-cp-url" class="aras-input ltr" placeholder="http://192.168.1.50:8000/v1" list="aras-cp-url-presets" autocomplete="off" />';
+    html += '<datalist id="aras-cp-url-presets">';
+    html += '<option value="http://127.0.0.1:11434/v1">Ollama (محلی)</option>';
+    html += '<option value="http://127.0.0.1:8000/v1">vLLM / LM Studio (محلی)</option>';
+    html += '<option value="https://openrouter.ai/api/v1">OpenRouter</option>';
+    html += '<option value="https://api.openai.com/v1">OpenAI</option>';
+    html += '<option value="https://api.anthropic.com">Anthropic</option>';
+    html += '<option value="https://api.groq.com/openai/v1">Groq</option>';
+    html += '<option value="https://generativelanguage.googleapis.com/v1beta/openai">Google Gemini (سازگار با OpenAI)</option>';
+    html += '<option value="https://api.deepseek.com">DeepSeek</option>';
+    html += '</datalist></div>';
+    html += '<div class="aras-field"><label>نام متغیر کلید API</label><input id="aras-cp-keyenv" class="aras-input ltr" placeholder="MY_GATEWAY_API_KEY" autocomplete="off" /></div>';
+    html += '<div class="aras-field"><label>فهرست مدل‌ها با کاما (برای مسیر دلخواه الزامی)</label><input id="aras-cp-models" class="aras-input ltr" placeholder="qwen2.5-72b, llama-3.3-70b" autocomplete="off" /></div>';
+    html += '<div class="aras-field"><label>هدایتگرهای سفارشی HTTP به‌صورت JSON (اختیاری)</label><input id="aras-cp-headers" class="aras-input ltr" placeholder="{&quot;X-Title&quot;:&quot;Aras&quot;}" autocomplete="off" /></div>';
     html += '</div>';
-    html += '<div style="margin-top:10px;"><button type="button" class="aras-btn primary" id="aras-save-cp-btn">ثبت ارائه‌دهنده</button></div>';
+
+    html += '<details class="aras-cp-advanced"><summary>تنظیمات پیشرفته مسیر (پنجره زمینه، سقف خروجی، ورودی‌های تصویری)</summary>';
+    html += '<div class="aras-form-grid">';
+    html += '<div class="aras-field"><label>پنجره زمینه پیش‌فرض (توکن)</label><input id="aras-cp-ctx" class="aras-input ltr" placeholder="مثلاً 32768" inputmode="numeric" /></div>';
+    html += '<div class="aras-field"><label>سقف توکن خروجی پیش‌فرض</label><input id="aras-cp-maxtok" class="aras-input ltr" placeholder="مثلاً 4096" inputmode="numeric" /></div>';
+    html += '<div class="aras-field"><label>ورودی مدل‌ها</label><select id="aras-cp-input" class="aras-select"><option value="">پیش‌فرض (فقط متن)</option><option value="text,image">متن و تصویر (مدل‌های بینایی)</option></select></div>';
+    html += '</div></details>';
+
+    html += '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">';
+    html += '<button type="button" class="aras-btn primary" id="aras-save-cp-btn">ثبت ارائه‌دهنده</button>';
+    html += '<button type="button" class="aras-btn" id="aras-reset-cp-btn" style="display:none;">انصراف از ویرایش</button>';
+    html += '</div>';
     html += '</div></div>';
 
     /* 4. Outbound Network, Proxy & 403 Diagnostics Card */
@@ -1920,31 +1966,107 @@ export const ARAS_UI_SCRIPT = `
       var cpUrl = document.getElementById('aras-cp-url');
       var cpKey = document.getElementById('aras-cp-keyenv');
       var cpModels = document.getElementById('aras-cp-models');
+      var cpHeaders = document.getElementById('aras-cp-headers');
+      var cpCtx = document.getElementById('aras-cp-ctx');
+      var cpMaxTok = document.getElementById('aras-cp-maxtok');
+      var cpInput = document.getElementById('aras-cp-input');
+
       var modelList = [];
       if (cpModels && cpModels.value.trim()) {
         var parts = cpModels.value.split(',');
         for (var mi = 0; mi < parts.length; mi++) {
           var mid = parts[mi].trim();
-          if (mid) modelList.push({ id: mid, name: mid });
+          if (mid && modelList.indexOf(mid) === -1) modelList.push(mid);
         }
       }
-      try {
-        await apiFetch('/aras-api/settings/providers/custom', {
-          method: 'POST',
-          body: {
-            id: cpId ? cpId.value : '',
-            displayName: cpName ? cpName.value : '',
-            api: cpApi ? cpApi.value : '',
-            baseURL: cpUrl ? cpUrl.value : '',
-            apiKeyEnv: cpKey ? cpKey.value : '',
-            models: modelList
+
+      var headerMap = null;
+      if (cpHeaders && cpHeaders.value.trim()) {
+        try {
+          var parsedHeaders = JSON.parse(cpHeaders.value);
+          if (!parsedHeaders || typeof parsedHeaders !== 'object' || Array.isArray(parsedHeaders)) {
+            throw new Error('bad shape');
           }
-        });
-        showToast('ارائه‌دهنده جدید ثبت شد.');
+          headerMap = parsedHeaders;
+        } catch (_e) {
+          showToast('هدایتگرها باید یک شیء JSON معتبر باشند، مثلاً {"X-Title":"Aras"}');
+          return;
+        }
+      }
+
+      var ctxNum = cpCtx && cpCtx.value.trim() ? Number(cpCtx.value.trim()) : 0;
+      var maxTokNum = cpMaxTok && cpMaxTok.value.trim() ? Number(cpMaxTok.value.trim()) : 0;
+      var inputList = cpInput && cpInput.value.trim()
+        ? cpInput.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean)
+        : [];
+
+      var payload = {
+        id: cpId ? cpId.value.trim() : '',
+        displayName: cpName ? cpName.value.trim() : '',
+        api: cpApi ? cpApi.value : '',
+        baseURL: cpUrl ? cpUrl.value.trim() : '',
+        apiKeyEnv: cpKey ? cpKey.value.trim() : '',
+        models: modelList
+      };
+      if (headerMap) payload.headers = headerMap;
+      if (ctxNum > 0) payload.defaultContextWindow = ctxNum;
+      if (maxTokNum > 0) payload.defaultMaxTokens = maxTokNum;
+      if (inputList.length > 0) payload.defaultInput = inputList;
+
+      try {
+        await apiFetch('/aras-api/settings/providers/custom', { method: 'POST', body: payload });
+        showToast('ارائه‌دهنده با موفقیت ذخیره و اعمال شد.');
+        state.editingProvider = null;
         await loadSettings();
       } catch (err) {
-        showToast(err.message);
+        showToast(err.message || 'ثبت ارائه‌دهنده انجام نشد.');
       }
+      return;
+    }
+
+    if (target.closest('#aras-reset-cp-btn')) {
+      state.editingProvider = null;
+      await loadSettings();
+      return;
+    }
+
+    var editProv = target.closest('[data-edit-provider]');
+    if (editProv) {
+      var editId = editProv.getAttribute('data-edit-provider') || '';
+      var snapTarget = state.settings;
+      var profile = null;
+      if (snapTarget && snapTarget.customProviders) {
+        for (var spi = 0; spi < snapTarget.customProviders.length; spi++) {
+          if (snapTarget.customProviders[spi].id === editId) { profile = snapTarget.customProviders[spi]; break; }
+        }
+      }
+      if (!profile) return;
+      state.editingProvider = editId;
+      var setVal = function (id, value) {
+        var el = document.getElementById(id);
+        if (el) el.value = value;
+      };
+      setVal('aras-cp-id', profile.id);
+      setVal('aras-cp-name', profile.displayName || '');
+      setVal('aras-cp-api', profile.api || '');
+      setVal('aras-cp-url', profile.baseURL || '');
+      setVal('aras-cp-keyenv', profile.apiKeyEnv || '');
+      setVal('aras-cp-models', (profile.models || []).map(function (m) { return m.id; }).join(', '));
+      setVal('aras-cp-headers', profile.headers && Object.keys(profile.headers).length
+        ? JSON.stringify(profile.headers)
+        : '');
+      setVal('aras-cp-ctx', profile.defaultContextWindow ? String(profile.defaultContextWindow) : '');
+      setVal('aras-cp-maxtok', profile.defaultMaxTokens ? String(profile.defaultMaxTokens) : '');
+      setVal('aras-cp-input', profile.defaultInput && profile.defaultInput.length
+        ? profile.defaultInput.join(',')
+        : '');
+      var resetBtn = document.getElementById('aras-reset-cp-btn');
+      if (resetBtn) resetBtn.style.display = '';
+      var idField = document.getElementById('aras-cp-id');
+      if (idField) idField.readOnly = true;
+      showToast('فیلدها برای ویرایش ارائه‌دهنده «' + (profile.displayName || editId) + '» بارگذاری شد.');
+      var card = document.getElementById('aras-cp-id');
+      if (card && card.scrollIntoView) card.scrollIntoView({ block: 'center', behavior: 'smooth' });
       return;
     }
 

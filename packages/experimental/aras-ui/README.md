@@ -131,6 +131,28 @@ All endpoints live under `/aras-api`:
 - `GET /aras-api/settings` — Read active/default model selection, catalog models, credential statuses, custom providers, outbound network/proxy status, and agent preferences.
 - `POST /aras-api/settings/{model,credentials,providers/deepseek,providers/custom,preferences,network}`, `POST /aras-api/settings/network/test`, and `DELETE /aras-api/settings/providers/custom/:id` — Persist settings, credentials, and live outbound HTTP/HTTPS proxy routing (`auto` / `direct` / `custom`) immediately without restart.
 
+<a id="custom-providers"></a>
+## Custom Providers and Arbitrary Base URLs
+
+`POST /aras-api/settings/providers/custom` accepts any provider endpoint, not only the ones the installed catalog ships. A route key does not have to name a pi-ai provider: when it does not, the profile is the whole provider declaration.
+
+| Field | Required for a hand-declared route | Notes |
+| --- | --- | --- |
+| `id` | yes | Lowercase letters, digits, `-`, `_`. Not a shipped route name. |
+| `baseURL` | yes | Any `http(s)` host, port, and path — LAN Ollama/vLLM, Azure, an internal gateway, a mirror. A missing scheme becomes `https`; a trailing slash is dropped. |
+| `api` | yes | One of `openai-completions`, `openai-responses`, `anthropic-messages`. |
+| `models` | yes | Bare ids, a comma-separated string, or entries carrying `contextWindow`, `maxTokens`, `input`, `tools`, `reasoning`. |
+| `apiKeyEnv` | no | Credential reference; omit for an unauthenticated local gateway. |
+| `headers` | no | Extra request headers (`X-Title`, `HTTP-Referer`, gateway tokens). |
+| `defaultContextWindow`, `defaultMaxTokens`, `defaultInput` | no | Route-wide fallbacks for models the entry itself does not size. |
+
+A route that *does* name a shipped provider (e.g. `openrouter`, `openai`, `anthropic`) may omit all three of `api`, `baseURL`, and `models` and inherit them from the catalog.
+
+Writes merge over the stored profile, so editing one field never erases the others, and a failed validation leaves the previous profile untouched.
+
+Endpoints on the operator's own network bypass the outbound proxy automatically: every declared `baseURL` whose host is loopback, RFC 1918 private, link-local, CGNAT, or a `.local` mDNS name is added to `NO_PROXY` when the provider list is read or written. A gateway at `http://192.168.1.50:8000` therefore never travels through a corporate tunnel that would answer `403 Access denied by security policy`, while public providers keep using the configured proxy. `baseURL` must be reachable **from the Harness host**, not from the browser.
+
+
 <a id="model-experience"></a>
 ## Model Experience
 

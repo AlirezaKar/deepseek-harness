@@ -1477,6 +1477,50 @@ button, input, textarea, select {
   border: 1px solid var(--border-subtle);
 }
 
+.aras-provider-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.7;
+  border: 1px solid transparent;
+}
+
+.aras-provider-badge.ok {
+  color: var(--success, #22c55e);
+  border-color: color-mix(in srgb, var(--success, #22c55e) 35%, transparent);
+  background: color-mix(in srgb, var(--success, #22c55e) 12%, transparent);
+}
+
+.aras-provider-badge.bad {
+  color: var(--warning, #f59e0b);
+  border-color: color-mix(in srgb, var(--warning, #f59e0b) 35%, transparent);
+  background: color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent);
+}
+
+.aras-cp-advanced {
+  margin-top: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: var(--bg-elevated);
+}
+
+.aras-cp-advanced > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.aras-cp-advanced[open] > summary {
+  margin-bottom: 10px;
+  color: var(--text-primary);
+}
+
 .aras-cred-info {
   display: flex;
   flex-direction: column;
