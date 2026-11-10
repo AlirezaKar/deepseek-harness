@@ -147,19 +147,35 @@ for /f "delims=" %%p in ('call pnpm -v 2^>nul') do set "PNPM_VER=%%p"
 echo       pnpm %PNPM_VER% OK.
 
 rem ===========================================================================
-rem Step 4/4: Verify Dependencies & UI Build Artifacts
+rem Step 4/4: Fast Filesystem Check (Only runs pnpm install when missing)
 rem ===========================================================================
 echo [4/4] Checking workspace dependencies and %UI_MODE% UI readiness...
 if "%FORCE_INSTALL%"=="1" goto :run_install
 if not exist "node_modules\.modules.yaml" goto :run_install
 if not exist "node_modules\tsx\package.json" goto :run_install
 if /i "%UI_MODE%"=="aras" if not exist "packages\experimental\aras-ui\node_modules\@deepseek-ai\cordis\package.json" goto :run_install
+
+rem Instant filesystem check for @earendil-works/pi-ai & its LLM SDK files (no package manager call)
+call :probe_llm_sdks
+if errorlevel 1 goto :repair_install
+echo       Dependencies already installed ^(skipping pnpm install^).
 goto :deps_ok
 
 :run_install
-echo       Installing workspace dependencies with pnpm install...
-call pnpm install
+call :resolve_pnpm_args
+echo       Installing workspace dependencies ^(one-time setup^)...
+call pnpm install %PNPM_EXTRA_ARGS%
 if errorlevel 1 goto :err_install_failed
+goto :deps_ok
+
+:repair_install
+echo       [WARN] Missing files detected in LLM SDK folder ^(e.g. openai/index.mjs^).
+echo       Removing only incomplete SDK folders and restoring from local pnpm store...
+node -e "const fs=require('node:fs'),p=require('node:path'),s=p.resolve('node_modules/.pnpm');if(fs.existsSync(s)){for(const d of fs.readdirSync(s)){if(/^openai@/.test(d)&&(!fs.existsSync(p.join(s,d,'node_modules/openai/package.json'))||!fs.existsSync(p.join(s,d,'node_modules/openai/index.mjs')))){try{fs.rmSync(p.join(s,d),{recursive:true,force:true});}catch{}}if(/^@earendil-works\+pi-ai@/.test(d)&&!fs.existsSync(p.join(s,d,'node_modules/@earendil-works/pi-ai/dist/api/openai-completions.js'))){try{fs.rmSync(p.join(s,d),{recursive:true,force:true});}catch{}}}}"
+call :resolve_pnpm_args
+call pnpm install %PNPM_EXTRA_ARGS%
+if errorlevel 1 goto :err_install_failed
+echo       LLM SDK files verified.
 
 :deps_ok
 rem Ensure TypeScript workspace path aliases are up to date
@@ -173,7 +189,7 @@ goto :check_dsh
 if not exist "packages\experimental\aras-ui\src\index.ts" goto :err_missing_aras
 if not exist "packages\experimental\aras-ui\override-web.source.patch.yml" goto :err_missing_aras
 if not exist "packages\experimental\aras-ui\standalone.source.patch.yml" goto :err_missing_aras
-echo       Aras Smart Assistant plugin files verified.
+echo       Aras Smart Assistant plugin ^& LLM SDKs ready.
 goto :ready_to_start
 
 :check_dsh
@@ -194,10 +210,36 @@ echo       Build completed successfully.
 :ready_to_start
 if "%CHECK_ONLY%"=="1" goto :check_only_done
 
+rem Enable Node 24 persistent on-disk V8 & tsx compile cache for much faster warm startups
+if not defined NODE_COMPILE_CACHE (
+    if defined LOCALAPPDATA (
+        set "NODE_COMPILE_CACHE=%LOCALAPPDATA%\deepseek-harness\compile-cache"
+    ) else (
+        set "NODE_COMPILE_CACHE=%TEMP%\deepseek-harness-compile-cache"
+    )
+)
+if not exist "%NODE_COMPILE_CACHE%" mkdir "%NODE_COMPILE_CACHE%" >nul 2>&1
+
+rem Ensure loopback traffic never traverses system/corporate HTTP proxies (prevents 403 on 127.0.0.1)
+if defined NO_PROXY (
+    set "NO_PROXY=localhost,127.0.0.1,::1,[::1],%NO_PROXY%"
+) else (
+    set "NO_PROXY=localhost,127.0.0.1,::1,[::1]"
+)
+set "no_proxy=%NO_PROXY%"
+
+set "BROWSER_HOST=%HOST%"
+if "%HOST%"=="127.0.0.1" set "BROWSER_HOST=localhost"
+if "%HOST%"=="::1" set "BROWSER_HOST=localhost"
+if "%HOST%"=="0.0.0.0" set "BROWSER_HOST=localhost"
+if "%HOST%"=="::" set "BROWSER_HOST=localhost"
+
 echo.
 echo ======================================================================
-if /i "%UI_MODE%"=="aras" echo   Starting Aras Smart Assistant UI on http://%HOST%:%PORT%/
-if /i "%UI_MODE%"=="dsh"  echo   Starting DeepSeek Harness Default Web UI on http://%HOST%:%PORT%/
+if /i "%UI_MODE%"=="aras" echo   Starting Aras Smart Assistant UI on http://%BROWSER_HOST%:%PORT%/  ^(bind %HOST%:%PORT%^)
+if /i "%UI_MODE%"=="dsh"  echo   Starting DeepSeek Harness Default Web UI on http://%BROWSER_HOST%:%PORT%/  ^(bind %HOST%:%PORT%^)
+echo   Compile cache : %NODE_COMPILE_CACHE%
+echo   Booting TypeScript runtime ^(first run populates cache; next runs start much faster^)...
 echo   Press Ctrl+C to stop the server.
 echo ======================================================================
 echo.
@@ -206,23 +248,27 @@ if /i "%UI_MODE%"=="aras" goto :launch_aras
 goto :launch_dsh
 
 :launch_aras
-set "BROWSER_HOST=%HOST%"
-if "%HOST%"=="0.0.0.0" set "BROWSER_HOST=127.0.0.1"
-if "%HOST%"=="::" set "BROWSER_HOST=127.0.0.1"
-if "%NO_OPEN%"=="0" start "" /b node -e "const http=require('node:http'),cp=require('node:child_process'),u='http://%BROWSER_HOST%:%PORT%/';let n=0;const t=setInterval(function(){if(++n>=75)return clearInterval(t);const r=http.get(u,function(res){if(res.statusCode===200){clearInterval(t);cp.exec('cmd /c start '+u);}res.resume();});r.on('error',function(){});},400);"
+rem Initialize the isolated "aras" profile once, from the shipped "web" template.
+rem $DSH_HOME is resolved exactly like @deepseek-ai/dsh-home-paths: blank -> %USERPROFILE%\.dsh,
+rem leading "~" -> the user profile, and a relative path -> absolute from the current directory.
+set "ARAS_PROFILE_INIT="
+node -e "const fs=require('node:fs'),p=require('node:path'),os=require('node:os');let h=String(process.env.DSH_HOME||'').trim();if(!h){h=p.join(os.homedir(),'.dsh');}else if(h==='~'){h=os.homedir();}else if(h.indexOf('~/')===0||h.indexOf('~\\')===0){h=p.join(os.homedir(),h.slice(2));}process.exit(fs.existsSync(p.join(p.resolve(h),'profiles','aras','package.json'))?0:1);"
+if errorlevel 1 set "ARAS_PROFILE_INIT=--from-default-profile web"
+
+if "%NO_OPEN%"=="0" start "" /b node -e "const http=require('node:http'),cp=require('node:child_process'),u='http://%BROWSER_HOST%:%PORT%/';let n=0;const t=setInterval(function(){if(++n>=150)return clearInterval(t);const r=http.get({hostname:'%BROWSER_HOST%',port:%PORT%,path:'/',agent:false},function(res){if(res.statusCode===200){clearInterval(t);cp.exec('cmd /c start '+u);}res.resume();});r.on('error',function(){});},400);"
 
 rem Wildcard 0.0.0.0 / :: uses standalone HTTP mode because dsh-host-webserver rejects wildcard binds
 if "%HOST%"=="0.0.0.0" goto :launch_aras_standalone
 if "%HOST%"=="::" goto :launch_aras_standalone
 
-node --import tsx/esm apps/cli/src/bin.ts web --patch ./packages/experimental/aras-ui/override-web.source.patch.yml --host "%HOST%" --port "%PORT%" --no-open
+node --import tsx/esm apps/cli/src/bin.ts aras %ARAS_PROFILE_INIT% --patch ./packages/experimental/aras-ui/override-web.source.patch.yml --host "%HOST%" --port "%PORT%" --no-open
 set "EXIT_CODE=%ERRORLEVEL%"
 goto :finish
 
 :launch_aras_standalone
 set "ARAS_UI_HOST=%HOST%"
 set "ARAS_UI_PORT=%PORT%"
-node --import tsx/esm apps/cli/src/bin.ts web --patch ./packages/experimental/aras-ui/standalone.source.patch.yml --no-open
+node --import tsx/esm apps/cli/src/bin.ts aras %ARAS_PROFILE_INIT% --patch ./packages/experimental/aras-ui/standalone.source.patch.yml --no-open
 set "EXIT_CODE=%ERRORLEVEL%"
 goto :finish
 
@@ -232,6 +278,15 @@ if "%NO_OPEN%"=="1" set "DSH_OPEN_ARG=--no-open"
 node --import tsx/esm apps/cli/src/bin.ts web --host "%HOST%" --port "%PORT%" %DSH_OPEN_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"
 goto :finish
+
+:probe_llm_sdks
+node -e "const fs=require('node:fs'),p=require('node:path');const piLink=p.resolve('packages/llm/llm-pi-ai/node_modules/@earendil-works/pi-ai');if(!fs.existsSync(p.join(piLink,'dist/api/openai-completions.js')))process.exit(1);let piReal=piLink;try{piReal=fs.realpathSync(piLink);}catch{}const nm=p.resolve(piReal,'..','..');const ok=(rel)=>fs.existsSync(p.join(nm,rel))||fs.existsSync(p.resolve('node_modules',rel));process.exit(ok('openai/package.json')&&ok('openai/index.mjs')&&ok('@anthropic-ai/sdk/package.json')&&ok('@google/genai/package.json')?0:1);" >nul 2>&1
+exit /b %ERRORLEVEL%
+
+:resolve_pnpm_args
+set "PNPM_EXTRA_ARGS=--prefer-offline"
+for /f "delims=" %%m in ('node -e "const fs=require('node:fs');if(fs.existsSync('node_modules/.modules.yaml')){const m=fs.readFileSync('node_modules/.modules.yaml','utf8').match(/^virtualStoreDirMaxLength:\s*(\d+)/m);if(m)process.stdout.write('--config.virtual-store-dir-max-length='+m[1]);}" 2^>nul') do set "PNPM_EXTRA_ARGS=--prefer-offline %%m"
+exit /b 0
 
 :check_only_done
 echo.

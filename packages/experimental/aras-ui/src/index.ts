@@ -19,7 +19,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { ArasHostBridge } from './bridge.ts'
-import type { ArasApprovalMode, ArasStreamEvent } from './types.ts'
+import type { ArasApprovalMode, ArasProviderModelEntry, ArasStreamEvent } from './types.ts'
 import { renderArasIndexHtml } from './ui-html.ts'
 
 export { ArasHostBridge, buildArasTranscript } from './bridge.ts'
@@ -31,7 +31,7 @@ export type * from './types.ts'
 export const name = 'aras-ui'
 
 /** Services required before mounting `@deepseek-ai/dsh-aras-ui`. */
-export const inject = ['sessions']
+export const inject = ['sessions', 'agents']
 
 /** Plugin configuration for `@deepseek-ai/dsh-aras-ui`. */
 export interface Config {
@@ -161,11 +161,18 @@ export function createArasApiHandler(
         return
       }
 
-      // 2. Sessions list
-      if (method === 'GET' && pathname === '/aras-api/sessions') {
-        const sessions = await bridge.listSessions()
-        sendJson(res, 200, { sessions })
-        return
+      // 2. Sessions list & bulk delete
+      if (pathname === '/aras-api/sessions') {
+        if (method === 'GET') {
+          const sessions = await bridge.listSessions()
+          sendJson(res, 200, { sessions })
+          return
+        }
+        if (method === 'DELETE') {
+          const result = await bridge.deleteAllSessions()
+          sendJson(res, 200, { ok: true, ...result })
+          return
+        }
       }
 
       // 3. Read image attachment (`/aras-api/sessions/:id/attachments/:attachmentId`)
@@ -225,13 +232,20 @@ export function createArasApiHandler(
         return
       }
 
-      // 6. Session detail (`/aras-api/sessions/:id`)
+      // 6. Session detail or delete (`/aras-api/sessions/:id`)
       const detailMatch = /^\/aras-api\/sessions\/([^/]+)$/.exec(pathname)
-      if (method === 'GET' && detailMatch !== null) {
+      if (detailMatch !== null) {
         const sessionId = decodeURIComponent(detailMatch[1]!)
-        const detail = await bridge.getSessionDetail(sessionId)
-        sendJson(res, 200, detail)
-        return
+        if (method === 'GET') {
+          const detail = await bridge.getSessionDetail(sessionId)
+          sendJson(res, 200, detail)
+          return
+        }
+        if (method === 'DELETE') {
+          const result = await bridge.deleteSession(sessionId)
+          sendJson(res, 200, { ok: true, ...result })
+          return
+        }
       }
 
       // 7. Interactive tool approval decision (`/aras-api/approvals/:id`)
@@ -351,7 +365,9 @@ export function createArasApiHandler(
         return
       }
 
-      // 13. Custom OpenAI-compatible provider upsert/remove (`POST /aras-api/settings/providers/custom`)
+      // 13. Provider route upsert/remove (`POST /aras-api/settings/providers/custom`)
+      //     Any endpoint is accepted: the route key need not name an installed
+      //     pi-ai provider, so LAN gateways and corporate proxies are first-class.
       if (method === 'POST' && pathname === '/aras-api/settings/providers/custom') {
         const body = await readJsonBody(req)
         const id = typeof body.id === 'string' ? body.id : ''
@@ -373,28 +389,28 @@ export function createArasApiHandler(
             ? body.baseUrl
             : undefined
         const apiKeyEnv = typeof body.apiKeyEnv === 'string' ? body.apiKeyEnv : undefined
-        const rawModels = Array.isArray(body.models) ? body.models : []
-        const models: Array<{ id: string; name?: string }> = []
-        for (const m of rawModels) {
-          if (typeof m === 'string' && m.trim().length > 0) {
-            models.push({ id: m.trim() })
-          } else if (typeof m === 'object' && m !== null) {
-            const rec = m as Record<string, unknown>
-            if (typeof rec.id === 'string' && rec.id.trim().length > 0) {
-              models.push({
-                id: rec.id.trim(),
-                ...(typeof rec.name === 'string' && rec.name.trim().length > 0 ? { name: rec.name.trim() } : {}),
-              })
-            }
-          }
-        }
+
+        // Models may arrive as bare ids, a comma-separated string, or full entries.
+        const models = body.models === undefined
+          ? undefined
+          : parseProviderModels(body.models)
+
+        const headers = parseProviderHeaders(body.headers)
+        const defaultInput = parseProviderModalities(body.defaultInput)
+        const defaultContextWindow = parsePositiveInteger(body.defaultContextWindow)
+        const defaultMaxTokens = parsePositiveInteger(body.defaultMaxTokens)
+
         await bridge.upsertCustomProvider({
           id,
           ...(displayName !== undefined ? { displayName } : {}),
           ...(api !== undefined ? { api } : {}),
           ...(baseURL !== undefined ? { baseURL } : {}),
           ...(apiKeyEnv !== undefined ? { apiKeyEnv } : {}),
-          models,
+          ...(models !== undefined ? { models } : {}),
+          ...(headers !== undefined ? { headers } : {}),
+          ...(defaultInput !== undefined ? { defaultInput } : {}),
+          ...(defaultContextWindow !== undefined ? { defaultContextWindow } : {}),
+          ...(defaultMaxTokens !== undefined ? { defaultMaxTokens } : {}),
         })
         const snapshot = await bridge.getSettingsSnapshot()
         sendJson(res, 200, snapshot)
@@ -427,6 +443,33 @@ export function createArasApiHandler(
         return
       }
 
+      // 16. Save outbound network / HTTP proxy mode (`POST /aras-api/settings/network`)
+      if (method === 'POST' && pathname === '/aras-api/settings/network') {
+        const body = await readJsonBody(req)
+        const mode = body.mode === 'auto' || body.mode === 'direct' || body.mode === 'custom'
+          ? body.mode
+          : 'auto'
+        const customProxyUrl = typeof body.customProxyUrl === 'string' ? body.customProxyUrl : undefined
+        const noProxy = typeof body.noProxy === 'string' ? body.noProxy : undefined
+        await bridge.updateNetworkConfig({
+          mode,
+          ...(customProxyUrl !== undefined ? { customProxyUrl } : {}),
+          ...(noProxy !== undefined ? { noProxy } : {}),
+        })
+        const snapshot = await bridge.getSettingsSnapshot()
+        sendJson(res, 200, snapshot)
+        return
+      }
+
+      // 17. Live outbound HTTPS connectivity diagnostic (`POST /aras-api/settings/network/test`)
+      if (method === 'POST' && pathname === '/aras-api/settings/network/test') {
+        const body = await readJsonBody(req)
+        const targetUrl = typeof body.targetUrl === 'string' ? body.targetUrl : undefined
+        const result = await bridge.testNetworkConnectivity(targetUrl)
+        sendJson(res, 200, result)
+        return
+      }
+
       sendJson(res, 404, { error: `مسیر API یافت نشد: ${pathname}` })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -440,6 +483,72 @@ export function createArasApiHandler(
     },
   })
   return handler
+}
+
+/**
+ * Read a provider model list from request JSON.
+ *
+ * Accepts the three shapes a client may send: bare ids (`["m1"]`), a
+ * comma-separated string (`"m1, m2"`), or full entries that also carry the
+ * per-model capacities and modalities the adapter understands.
+ * @param raw - the `models` member of the request body.
+ * @returns normalized model entries; an explicitly empty list clears the declaration.
+ */
+function parseProviderModels(raw: unknown): ArasProviderModelEntry[] {
+  const texts: unknown[] = typeof raw === 'string' ? raw.split(',') : Array.isArray(raw) ? raw : []
+  const models: ArasProviderModelEntry[] = []
+  for (const item of texts) {
+    if (typeof item === 'string') {
+      const id = item.trim()
+      if (id.length > 0) models.push({ id })
+      continue
+    }
+    if (typeof item !== 'object' || item === null) continue
+    const rec = item as Record<string, unknown>
+    if (typeof rec.id !== 'string' || rec.id.trim().length === 0) continue
+    const contextWindow = parsePositiveInteger(rec.contextWindow)
+    const maxTokens = parsePositiveInteger(rec.maxTokens)
+    const input = parseProviderModalities(rec.input)
+    models.push({
+      id: rec.id.trim(),
+      ...(typeof rec.name === 'string' && rec.name.trim().length > 0 ? { name: rec.name.trim() } : {}),
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+      ...(input === undefined ? {} : { input }),
+      ...(typeof rec.tools === 'boolean' ? { tools: rec.tools } : {}),
+      ...(typeof rec.reasoning === 'boolean' ? { reasoning: rec.reasoning } : {}),
+    })
+  }
+  return models
+}
+
+/** Read a route header map, ignoring non-string values. */
+function parseProviderHeaders(raw: unknown): Record<string, string> | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const headers: Record<string, string> = {}
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'string') headers[name] = value
+  }
+  return headers
+}
+
+/** Read an input-modality list, keeping only the modalities the adapter supports. */
+function parseProviderModalities(raw: unknown): ('text' | 'image')[] | undefined {
+  const list = typeof raw === 'string' ? raw.split(',') : Array.isArray(raw) ? raw : undefined
+  if (list === undefined) return undefined
+  const modalities: ('text' | 'image')[] = []
+  for (const item of list) {
+    if (typeof item !== 'string') continue
+    const value = item.trim()
+    if ((value === 'text' || value === 'image') && !modalities.includes(value)) modalities.push(value)
+  }
+  return modalities
+}
+
+/** Read an optional positive integer field. */
+function parsePositiveInteger(raw: unknown): number | undefined {
+  const value = typeof raw === 'string' ? Number(raw.trim()) : raw
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
 }
 
 /** Build the SPA fallback handler serving the RTL Aras UI shell. */
@@ -507,10 +616,75 @@ async function listenStandaloneServer(
   })
 
   const addr = server.address() as AddressInfo
-  const displayHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host
+  const rawOriginHost = host.includes(':') ? `[${host}]` : host
+  const companion = (host === '127.0.0.1' || host === '::1' || host === '0.0.0.0')
+    ? startCompanionLoopbackServer(
+      `http://${host === '0.0.0.0' ? '127.0.0.1' : rawOriginHost}:${String(addr.port)}`,
+      apiHandler,
+      fallbackHandler,
+    )
+    : null
+  if (companion !== null) {
+    server.once('close', () => {
+      companion.close()
+    })
+  }
+  const displayHost = host === '0.0.0.0' || host === '::' || host === '127.0.0.1' || host === '::1'
+    ? 'localhost'
+    : rawOriginHost
   return {
     server,
     url: `http://${displayHost}:${String(addr.port)}/`,
+  }
+}
+
+/**
+ * Best-effort companion loopback listener so `http://localhost:<port>/` resolves
+ * immediately over both IPv6 `[::1]` and IPv4 `127.0.0.1` without proxy interception
+ * or Happy Eyeballs fallback delay when `dsh-host-webserver` binds a single IP family.
+ */
+function startCompanionLoopbackServer(
+  origin: string,
+  apiHandler: (req: IncomingMessage, res: ServerResponse) => Promise<void>,
+  fallbackHandler: (req: IncomingMessage, res: ServerResponse) => void,
+): Server | null {
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    return null
+  }
+  const port = Number(parsed.port)
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null
+
+  const companionHost = parsed.hostname === '127.0.0.1'
+    ? '::1'
+    : parsed.hostname === '[::1]' || parsed.hostname === '::1'
+      ? '127.0.0.1'
+      : null
+  if (companionHost === null) return null
+
+  const companion = createServer((req, res) => {
+    const pathname = new URL(req.url ?? '/', 'http://aras.local').pathname
+    if (pathname === '/aras-api' || pathname.startsWith('/aras-api/')) {
+      void apiHandler(req, res)
+      return
+    }
+    fallbackHandler(req, res)
+  })
+  // A listener error is never fatal: the primary server still serves the UI.
+  // The handler stays attached (not `once`) because a later error on a listening
+  // socket would otherwise surface as an uncaught exception.
+  companion.on('error', () => {
+    // Ignore EADDRINUSE / EAFNOSUPPORT on single-stack machines.
+  })
+  try {
+    companion.listen({ host: companionHost, port, ipv6Only: companionHost === '::1' })
+    companion.unref()
+    return companion
+  } catch {
+    companion.close()
+    return null
   }
 }
 
@@ -535,16 +709,29 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       })
       const disposeFallback = webServer.registerFallback(fallbackHandler)
 
-      if (config.printUrl) {
-        try {
-          process.stdout.write(`Aras Smart Assistant UI (دستیار هوشمند ارس): ${webServer.getOrigin()}/\n`)
-        } catch {
-          // Listener may not be bound in synthetic tests.
+      let companionServer: Server | null = null
+      try {
+        const origin = webServer.getOrigin()
+        companionServer = startCompanionLoopbackServer(origin, apiHandler, fallbackHandler)
+        if (config.printUrl) {
+          let friendlyUrl = `${origin}/`
+          try {
+            const u = new URL(origin)
+            if (u.hostname === '127.0.0.1' || u.hostname === '[::1]' || u.hostname === '::1') {
+              friendlyUrl = `http://localhost:${u.port}/  (also ${origin}/)`
+            }
+          } catch {
+            // Keep raw origin.
+          }
+          process.stdout.write(`Aras Smart Assistant UI (دستیار هوشمند ارس): ${friendlyUrl}\n`)
         }
+      } catch {
+        // Listener may not be bound in synthetic tests.
       }
 
       webCtx.effect(() => () => {
         apiHandler.closeAllStreams?.()
+        companionServer?.close()
         disposeFallback()
         disposeApi()
       })

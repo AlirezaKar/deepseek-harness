@@ -7,8 +7,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type AgentOptions, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -28,6 +28,8 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
+import { ArasNetworkController, resolveArasDshHome } from './network.ts'
+import { ARAS_SUPPORTED_PROTOCOLS } from './types.ts'
 import type {
   ArasApprovalMode,
   ArasCredentialStatus,
@@ -35,9 +37,12 @@ import type {
   ArasImageAttachmentView,
   ArasLiveStreamState,
   ArasModelEntry,
+  ArasNetworkMode,
+  ArasNetworkTestResult,
   ArasPendingApproval,
   ArasPendingQuestion,
   ArasProviderCatalogGroup,
+  ArasProviderModelEntry,
   ArasSessionDetail,
   ArasSessionSummary,
   ArasSettingsSnapshot,
@@ -48,11 +53,24 @@ import type {
 
 const STANDARD_CREDENTIAL_REFS: readonly { readonly ref: string; readonly label: string }[] = [
   { ref: 'DEEPSEEK_API_KEY', label: 'کلید API دیپ‌سیک (DeepSeek Official)' },
+  { ref: 'OPENROUTER_API_KEY', label: 'کلید API اوپن‌روتر (OpenRouter)' },
+  { ref: 'GEMINI_API_KEY', label: 'کلید API گوگل جمینای (Google Gemini)' },
+  { ref: 'GROQ_API_KEY', label: 'کلید API گروک (Groq)' },
   { ref: 'OPENAI_API_KEY', label: 'کلید API اوپن‌ای‌آی (OpenAI)' },
   { ref: 'ANTHROPIC_API_KEY', label: 'کلید API آنتروپیک (Anthropic Claude)' },
-  { ref: 'GEMINI_API_KEY', label: 'کلید API گوگل جمینای (Google Gemini)' },
-  { ref: 'OPENROUTER_API_KEY', label: 'کلید API اوپن‌روتر (OpenRouter)' },
 ]
+
+/** Built-in `llm-pi-ai` catalog provider routes keyed by standard API key env var. */
+const BUILTIN_PI_AI_CREDENTIAL_ROUTES: Readonly<Record<string, { readonly id: string; readonly displayName: string }>> = {
+  OPENROUTER_API_KEY: { id: 'openrouter', displayName: 'OpenRouter' },
+  GEMINI_API_KEY: { id: 'google', displayName: 'Google Gemini' },
+  GROQ_API_KEY: { id: 'groq', displayName: 'Groq' },
+  OPENAI_API_KEY: { id: 'openai', displayName: 'OpenAI' },
+  ANTHROPIC_API_KEY: { id: 'anthropic', displayName: 'Anthropic Claude' },
+  XAI_API_KEY: { id: 'xai', displayName: 'xAI (Grok)' },
+  MISTRAL_API_KEY: { id: 'mistral', displayName: 'Mistral AI' },
+  TOGETHER_API_KEY: { id: 'together', displayName: 'Together AI' },
+}
 
 interface PendingApprovalEntry {
   readonly view: ArasPendingApproval
@@ -134,6 +152,83 @@ function extractToolResultText(message: ToolResultMessage): string {
 
 function isHumanUserMessage(message: UserMessage): boolean {
   return message.source.kind === 'user'
+}
+
+/**
+ * Validate and canonicalize a user-supplied provider endpoint.
+ *
+ * Any host is accepted — a LAN Ollama/vLLM port, a corporate gateway, an Azure
+ * deployment, a regional mirror — because the route key need not name an
+ * installed pi-ai provider. The value keeps its path and loses only the
+ * trailing slash that would otherwise produce `//chat/completions`.
+ * @param raw - endpoint exactly as typed in the settings form.
+ * @returns the canonical absolute URL.
+ * @throws when the text is not an absolute http(s) URL.
+ */
+export function normalizeProviderBaseUrl(raw: string): string {
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) {
+    throw new Error('نشانی Base URL نمی‌تواند خالی باشد.')
+  }
+  // A bare `host:port` reads as an unknown scheme to `new URL`, so give it one.
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed) ? trimmed : `https://${trimmed}`
+  let parsed: URL
+  try {
+    parsed = new URL(candidate)
+  } catch {
+    throw new Error(`نشانی Base URL معتبر نیست: ${trimmed}`)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      `پروتکل ${parsed.protocol.replace(':', '')} برای درگاه پشتیبانی نمی‌شود؛ نشانی را با http:// یا https:// وارد کنید.`,
+    )
+  }
+  if (parsed.hostname.length === 0) {
+    throw new Error('نام میزبان در نشانی Base URL مشخص نیست.')
+  }
+  const pathname = parsed.pathname.replace(/\/+$/u, '')
+  return `${parsed.protocol}//${parsed.host}${pathname}${parsed.search}`
+}
+
+/** Normalize a hand-declared model list: trim ids, drop blanks and duplicates, keep optional fields. */
+export function normalizeProviderModels(
+  models: readonly ArasProviderModelEntry[],
+): ArasProviderModelEntry[] {
+  const seen = new Set<string>()
+  const result: ArasProviderModelEntry[] = []
+  for (const model of models) {
+    const id = model.id.trim()
+    if (id.length === 0 || seen.has(id)) continue
+    seen.add(id)
+    const name = model.name?.trim()
+    const input = model.input === undefined
+      ? undefined
+      : [...new Set(model.input.filter(item => item === 'text' || item === 'image'))]
+    result.push({
+      id,
+      ...(name !== undefined && name.length > 0 ? { name } : {}),
+      ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+      ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+      ...(input === undefined || input.length === 0 ? {} : { input }),
+      ...(model.tools === undefined ? {} : { tools: model.tools }),
+      ...(model.reasoning === undefined ? {} : { reasoning: model.reasoning }),
+    })
+  }
+  return result
+}
+
+/** Normalize route headers, dropping blanks so an empty form field never sends an invalid header. */
+export function normalizeProviderHeaders(
+  headers: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers)) {
+    const key = name.trim()
+    const trimmed = value.trim()
+    if (key.length === 0 || trimmed.length === 0) continue
+    result[key] = trimmed
+  }
+  return result
 }
 
 function deriveTitleFromEvents(events: readonly SessionEvent[]): string | undefined {
@@ -320,6 +415,7 @@ function syncAssistantTools(
  * clarifying questions, and settings/credential management.
  */
 export class ArasHostBridge {
+  private readonly ctx: Context
   private approvalMode: ArasApprovalMode
   private defaultCwd: string
   private readonly ownedHandles = new Map<string, AgentHandle>()
@@ -330,6 +426,11 @@ export class ArasHostBridge {
   private readonly pendingQuestions = new Map<string, PendingQuestionEntry>()
   private readonly subscribers = new Set<(event: ArasStreamEvent) => void>()
   private readonly disposers: (() => void)[] = []
+  private readonly dismissedBuiltinRoutes = new Set<string>()
+  private readonly deletedSessionIds = new Set<string>()
+  private deletedSessionsLoaded = false
+  private readonly dshHomeDir: string
+  private readonly networkController: ArasNetworkController
   private readonly lifetime = new AbortController()
 
   /**
@@ -338,11 +439,17 @@ export class ArasHostBridge {
    * @param options - resolved initial bridge configuration.
    */
   constructor(
-    private readonly ctx: Context,
+    ctx: Context,
     options?: Partial<ArasBridgeOptions>,
   ) {
+    this.ctx = ctx
     this.approvalMode = options?.defaultApprovalPolicy ?? 'ask'
     this.defaultCwd = resolve(options?.defaultCwd ?? process.cwd())
+    this.dshHomeDir = resolveArasDshHome()
+    this.networkController = new ArasNetworkController(this.dshHomeDir)
+    void this.networkController.ensureInitialized().catch((err) => {
+      this.ctx.logger.warn(`aras-ui network init warning: ${String(err)}`)
+    })
 
     this.disposers.push(ctx.on('agent/assistant-stream', ({ agent, frame }) => {
       if (agent.session.header.origin === 'subagent') return
@@ -506,7 +613,14 @@ export class ArasHostBridge {
 
     this.disposers.push(ctx.on('agent/error', ({ agent, error }) => {
       if (agent.session.header.origin === 'subagent') return
-      const message = error instanceof Error ? error.message : String(error)
+      const rawMessage = error instanceof Error ? error.message : String(error)
+      let message = rawMessage
+      if (/\b403\b|access denied by security policy|forbidden/iu.test(rawMessage)) {
+        const isPolicy = /security policy/iu.test(rawMessage)
+        message = isPolicy
+          ? `${rawMessage}\n(راهنما: خطای ۴۰۳ ناشی از پراکسی/فایروال شبکه است. از بخش «تنظیمات سامانه ← شبکه و پراکسی» حالت را روی «اتصال مستقیم» یا پورت VPN محلی قرار دهید.)`
+          : `${rawMessage}\n(راهنما: خطای ۴۰۳ از سمت ارائه‌دهنده مدل دریافت شد. از بخش «تنظیمات سامانه ← شبکه و پراکسی» اتصال VPN یا پراکسی دستی را بررسی و تست کنید.)`
+      }
       this.broadcast({
         type: 'session.error',
         sessionId: String(agent.session.id),
@@ -623,6 +737,8 @@ export class ArasHostBridge {
    * @returns summaries of live and persisted sessions.
    */
   async listSessions(): Promise<ArasSessionSummary[]> {
+    await this.ensureDeletedSessionsLoaded()
+    const archivedIds = this.readArchivedSessionIds()
     const byId = new Map<string, ArasSessionSummary>()
 
     const persistence = this.ctx.get('sessionPersistence')
@@ -632,6 +748,7 @@ export class ArasHostBridge {
         const header = snap.header
         if (header.origin === 'subagent') continue
         const id = String(header.id)
+        if (this.deletedSessionIds.has(id) || archivedIds.has(id)) continue
         byId.set(id, {
           id,
           title: this.customTitles.get(id) ?? `گفتگو ${id.slice(-6)}`,
@@ -644,7 +761,9 @@ export class ArasHostBridge {
 
     for (const session of this.ctx.sessions.list()) {
       if (session.header.origin === 'subagent') continue
-      byId.set(String(session.id), this.summarizeLiveSession(session))
+      const id = String(session.id)
+      if (this.deletedSessionIds.has(id) || archivedIds.has(id)) continue
+      byId.set(id, this.summarizeLiveSession(session))
     }
 
     return [...byId.values()].sort((left, right) => right.createdAt - left.createdAt)
@@ -658,6 +777,7 @@ export class ArasHostBridge {
   async createSession(requestedCwd?: string): Promise<ArasSessionDetail> {
     const cwd = resolve(requestedCwd !== undefined && requestedCwd.trim().length > 0 ? requestedCwd : this.defaultCwd)
     await mkdir(cwd, { recursive: true })
+    await this.sanitizeSavedDefaultSelection()
     const sessionId = brandString<SessionId>(`aras-${randomUUID()}`)
     const presets = this.ctx.get('agentPresets')
     const resolvedPreset = presets === undefined ? undefined : (await presets.resolve(undefined)).id
@@ -688,8 +808,93 @@ export class ArasHostBridge {
    * @returns session detail snapshot.
    */
   async getSessionDetail(rawId: string): Promise<ArasSessionDetail> {
+    await this.ensureDeletedSessionsLoaded()
+    if (this.deletedSessionIds.has(rawId)) {
+      throw Object.assign(new Error('گفتگوی مورد نظر یافت نشد یا قبلاً حذف شده است.'), { statusCode: 404 })
+    }
     const agent = await this.ensureLiveAgent(rawId)
     return this.detailForAgent(agent)
+  }
+
+  /**
+   * Delete a conversation session: cancel active work, dispose live agent handle,
+   * archive in workspaceRegistry (if mounted), and remove persisted JSONL artifacts.
+   * @param rawId - session id to delete.
+   * @returns `{ deleted: true }` once removed.
+   */
+  async deleteSession(rawId: string): Promise<{ readonly deleted: boolean }> {
+    const trimmed = rawId.trim()
+    if (!trimmed) {
+      throw new Error('شناسه گفتگو نامعتبر است.')
+    }
+    await this.ensureDeletedSessionsLoaded()
+    const brandedId = brandString<SessionId>(trimmed)
+
+    // 1. Cancel any active turn and resolve pending interactive waits for this session.
+    const liveAgent = this.ctx.agents.get(brandedId)
+    liveAgent?.cancel({ kind: 'user' })
+
+    for (const entry of [...this.pendingApprovals.values()]) {
+      if (entry.view.sessionId === trimmed) {
+        entry.resolve('cancelled')
+      }
+    }
+    for (const entry of [...this.pendingQuestions.values()]) {
+      if (entry.view.sessionId === trimmed) {
+        entry.reject(new UserQuestionError('گفتگو توسط کاربر حذف شد', 'ASK_CANCELLED'))
+      }
+    }
+
+    // 2. Archive in workspaceRegistry if present so other DSH surfaces also hide it.
+    const ws = (this.ctx as unknown as { get(key: string): unknown }).get('workspaceRegistry') as
+      | { archiveSession?: (id: SessionId, opts?: { stopActivity?: boolean }) => Promise<void> }
+      | undefined
+    if (ws?.archiveSession !== undefined) {
+      try {
+        await ws.archiveSession(brandedId, { stopActivity: true })
+      } catch {
+        // Ignore unknown/untracked workspace registry errors.
+      }
+    }
+
+    // 3. Dispose owned AgentHandle (closes JSONL write handle & detaches Session).
+    const owned = this.ownedHandles.get(trimmed)
+    if (owned !== undefined) {
+      this.ownedHandles.delete(trimmed)
+      try {
+        await owned.dispose()
+      } catch {
+        // Continue cleanup even if handle teardown warns.
+      }
+    }
+
+    // 4. Clean memory indices, persist deletion marker, and remove JSONL directory on disk.
+    this.liveStreams.delete(trimmed)
+    this.customTitles.delete(trimmed)
+    for (const key of [...this.attachmentRefs.keys()]) {
+      if (key.startsWith(`${trimmed}:`)) this.attachmentRefs.delete(key)
+    }
+
+    this.deletedSessionIds.add(trimmed)
+    await this.saveDeletedSessions()
+    await this.removePhysicalSessionDirs(trimmed)
+
+    this.broadcast({ type: 'session.deleted', sessionId: trimmed })
+    return { deleted: true }
+  }
+
+  /**
+   * Delete all non-subagent conversation sessions listed by the bridge.
+   * @returns count of deleted sessions.
+   */
+  async deleteAllSessions(): Promise<{ readonly deletedCount: number }> {
+    const existing = await this.listSessions()
+    let deletedCount = 0
+    for (const item of existing) {
+      await this.deleteSession(item.id)
+      deletedCount += 1
+    }
+    return { deletedCount }
   }
 
   /**
@@ -843,11 +1048,10 @@ export class ArasHostBridge {
    */
   async getSettingsSnapshot(): Promise<ArasSettingsSnapshot> {
     const defaultSel = this.currentDefaultSelection()
-    const { groups, failures } = await this.buildLiveCatalog()
     const settingsSvc = this.ctx.get('settings')
     const credentialsSvc = this.ctx.get('credentials')
 
-    const namespaces = settingsSvc?.describe({ redactSecrets: true }) ?? []
+    let namespaces = settingsSvc?.describe({ redactSecrets: true }) ?? []
     const deepseekNs = namespaces.find(item => String(item.ns) === 'llm-deepseek')
     const deepseekVal = isPlainRecord(deepseekNs?.value) ? deepseekNs.value : {}
     const deepseekConfig = {
@@ -858,9 +1062,38 @@ export class ArasHostBridge {
       reasoningEffort: typeof deepseekVal.reasoningEffort === 'string' ? deepseekVal.reasoningEffort : '',
     }
 
-    const piAiNs = namespaces.find(item => String(item.ns) === 'llm-pi-ai')
-    const piAiVal = isPlainRecord(piAiNs?.value) ? piAiNs.value : {}
-    const rawProviders = isPlainRecord(piAiVal.providers) ? piAiVal.providers : {}
+    let piAiNs = namespaces.find(item => String(item.ns) === 'llm-pi-ai')
+    let piAiVal = isPlainRecord(piAiNs?.value) ? piAiNs.value : {}
+    let rawProviders = isPlainRecord(piAiVal.providers) ? piAiVal.providers : {}
+
+    // Auto-activate built-in pi-ai catalog routes (OpenRouter, Gemini, Groq, OpenAI, Anthropic)
+    // when their standard API key is already saved in credentials and not manually dismissed.
+    if (settingsSvc?.writable === true && credentialsSvc !== undefined) {
+      const autoOps: { op: 'set'; path: readonly string[]; value: unknown }[] = []
+      const addedRouteIds: string[] = []
+      for (const [envRef, routeMeta] of Object.entries(BUILTIN_PI_AI_CREDENTIAL_ROUTES)) {
+        if (routeMeta.id in rawProviders || this.dismissedBuiltinRoutes.has(routeMeta.id)) continue
+        const credInfo = await credentialsSvc.describe(credentialRef(envRef))
+        if (credInfo.configured) {
+          autoOps.push({
+            op: 'set',
+            path: ['providers', routeMeta.id],
+            value: { displayName: routeMeta.displayName, apiKeyEnv: envRef },
+          })
+          addedRouteIds.push(routeMeta.id)
+        }
+      }
+      if (autoOps.length > 0) {
+        await settingsSvc.mutate(brandString<SettingsNamespace>('llm-pi-ai'), autoOps)
+        await this.waitForProviderRoutes(addedRouteIds, true)
+        namespaces = settingsSvc.describe({ redactSecrets: true })
+        piAiNs = namespaces.find(item => String(item.ns) === 'llm-pi-ai')
+        piAiVal = isPlainRecord(piAiNs?.value) ? piAiNs.value : {}
+        rawProviders = isPlainRecord(piAiVal.providers) ? piAiVal.providers : {}
+      }
+    }
+
+    const { groups, failures } = await this.buildLiveCatalog()
     const customProviders: ArasCustomProviderProfile[] = []
     const extraRefs = new Set<string>()
     if (deepseekConfig.apiKeyEnv.length > 0) extraRefs.add(deepseekConfig.apiKeyEnv)
@@ -870,24 +1103,58 @@ export class ArasHostBridge {
       const apiKeyEnv = typeof profile.apiKeyEnv === 'string' ? profile.apiKeyEnv : ''
       if (apiKeyEnv.length > 0) extraRefs.add(apiKeyEnv)
       const rawModels = Array.isArray(profile.models) ? profile.models : []
-      const models: { id: string; name: string }[] = []
+      const declaredModels: ArasProviderModelEntry[] = []
       for (const item of rawModels) {
-        if (isPlainRecord(item) && typeof item.id === 'string') {
-          models.push({
-            id: item.id,
-            name: typeof item.name === 'string' && item.name.length > 0 ? item.name : item.id,
-          })
+        if (!isPlainRecord(item) || typeof item.id !== 'string' || item.id.length === 0) continue
+        const input = Array.isArray(item.input)
+          ? item.input.filter((m): m is 'text' | 'image' => m === 'text' || m === 'image')
+          : undefined
+        declaredModels.push({
+          id: item.id,
+          ...(typeof item.name === 'string' && item.name.length > 0 ? { name: item.name } : {}),
+          ...(typeof item.contextWindow === 'number' ? { contextWindow: item.contextWindow } : {}),
+          ...(typeof item.maxTokens === 'number' ? { maxTokens: item.maxTokens } : {}),
+          ...(input === undefined || input.length === 0 ? {} : { input: [...new Set(input)] }),
+          ...(typeof item.tools === 'boolean' ? { tools: item.tools } : {}),
+          ...(typeof item.reasoning === 'boolean' ? { reasoning: item.reasoning } : {}),
+        })
+      }
+      const headers: Record<string, string> = {}
+      if (isPlainRecord(profile.headers)) {
+        for (const [name, value] of Object.entries(profile.headers)) {
+          if (typeof value === 'string') headers[name] = value
         }
       }
+      const liveModels = groups.find(group => group.id === id)?.models.length ?? 0
+      const failure = failures.find(entry => entry.id === id)
       customProviders.push({
         id,
         displayName: typeof profile.displayName === 'string' && profile.displayName.length > 0 ? profile.displayName : id,
-        api: typeof profile.api === 'string' ? profile.api : 'openai-completions',
+        api: typeof profile.api === 'string' && profile.api.length > 0 ? profile.api : '',
         baseURL: typeof profile.baseURL === 'string' ? profile.baseURL : '',
         apiKeyEnv,
-        models,
+        models: declaredModels,
+        headers,
+        ...(typeof profile.defaultContextWindow === 'number' ? { defaultContextWindow: profile.defaultContextWindow } : {}),
+        ...(typeof profile.defaultMaxTokens === 'number' ? { defaultMaxTokens: profile.defaultMaxTokens } : {}),
+        ...(Array.isArray(profile.defaultInput)
+          ? {
+            defaultInput: profile.defaultInput.filter(
+              (m): m is 'text' | 'image' => m === 'text' || m === 'image',
+            ),
+          }
+          : {}),
+        declared: typeof profile.api === 'string' && profile.api.length > 0 && typeof profile.baseURL === 'string',
+        serviceable: liveModels > 0,
+        ...(failure === undefined ? {} : { problem: failure.message }),
       })
     }
+
+    // A provider declared on the operator's own network must not be pushed
+    // through the outbound proxy, so register its endpoint for NO_PROXY bypass.
+    await this.networkController.setCustomProviderUrls(
+      customProviders.map(provider => provider.baseURL).filter(url => url.length > 0),
+    )
 
     const refMap = new Map<string, string>(STANDARD_CREDENTIAL_REFS.map(item => [item.ref, item.label]))
     for (const ref of extraRefs) {
@@ -918,6 +1185,8 @@ export class ArasHostBridge {
       }
     }
 
+    const network = await this.networkController.getStatus()
+
     return {
       defaultModel: defaultSel,
       catalog: groups,
@@ -929,6 +1198,9 @@ export class ArasHostBridge {
         approvalMode: this.approvalMode,
         defaultCwd: this.defaultCwd,
       },
+      supportedProtocols: [...ARAS_SUPPORTED_PROTOCOLS],
+      catalogRouteModels: Object.fromEntries(groups.map(group => [group.id, group.models.map(m => m.id)])),
+      network,
       settingsWritable: settingsSvc?.writable ?? false,
       credentialsWritable: credentialsSvc !== undefined,
     }
@@ -956,6 +1228,24 @@ export class ArasHostBridge {
         throw new Error('مقدار کلید API نمی‌تواند خالی باشد.')
       }
       await credentialsSvc.set(branded, value.trim())
+
+      const builtinRoute = BUILTIN_PI_AI_CREDENTIAL_ROUTES[ref]
+      const settingsSvc = this.ctx.get('settings')
+      if (builtinRoute !== undefined && settingsSvc?.writable === true) {
+        this.dismissedBuiltinRoutes.delete(builtinRoute.id)
+        const namespaces = settingsSvc.describe({ redactSecrets: true })
+        const piAiNs = namespaces.find(item => String(item.ns) === 'llm-pi-ai')
+        const piAiVal = isPlainRecord(piAiNs?.value) ? piAiNs.value : {}
+        const rawProviders = isPlainRecord(piAiVal.providers) ? piAiVal.providers : {}
+        if (!(builtinRoute.id in rawProviders)) {
+          await settingsSvc.mutate(brandString<SettingsNamespace>('llm-pi-ai'), [{
+            op: 'set',
+            path: ['providers', builtinRoute.id],
+            value: { displayName: builtinRoute.displayName, apiKeyEnv: ref },
+          }])
+          await this.waitForProviderRoutes([builtinRoute.id], true)
+        }
+      }
     }
   }
 
@@ -972,12 +1262,17 @@ export class ArasHostBridge {
     if (input.provider.trim().length === 0 || input.model.trim().length === 0) {
       throw new Error('انتخاب ارائه‌دهنده و نام مدل الزامی است.')
     }
+    const provider = input.provider.trim()
+    const model = input.model.trim()
+    const normalizedEffort = await this.normalizeReasoningEffort(
+      provider,
+      model,
+      input.reasoningEffort?.trim(),
+    )
     const selection: ModelSelection = {
-      provider: input.provider.trim(),
-      model: input.model.trim(),
-      ...(input.reasoningEffort === undefined || input.reasoningEffort.trim().length === 0
-        ? {}
-        : { reasoningEffort: ReasoningEffortId(input.reasoningEffort.trim()) }),
+      provider,
+      model,
+      ...(normalizedEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(normalizedEffort) }),
     }
     const defaults = this.ctx.get('agentDefaultModel')
     if (defaults !== undefined) {
@@ -1034,8 +1329,19 @@ export class ArasHostBridge {
   }
 
   /**
-   * Add, update, or remove a provider profile under `llm-pi-ai` (OpenAI, Anthropic, OpenRouter, Ollama, custom gateways).
-   * @param input - provider route profile or `{ id, remove: true }`.
+   * Add, update, or remove a provider route under `llm-pi-ai`.
+   *
+   * A route key does not have to name an installed pi-ai provider, so any
+   * endpoint is configurable: `baseURL` is passed through verbatim (a local
+   * Ollama/vLLM port, a corporate gateway, a CDN mirror, an Azure deployment).
+   * Fields a caller omits are preserved from the stored profile, so editing one
+   * field never erases the others, and blank strings remove a declaration
+   * instead of persisting an empty one the adapter would reject.
+   *
+   * @param input - provider route profile, or `{ id, remove: true }`.
+   * @throws when the route id is malformed, or when the resulting profile could
+   *   never be served (a hand-declared route missing `api`, `baseURL`, or its
+   *   model list).
    */
   async upsertCustomProvider(
     input:
@@ -1046,7 +1352,11 @@ export class ArasHostBridge {
         readonly api?: string
         readonly baseURL?: string
         readonly apiKeyEnv?: string
-        readonly models?: readonly { readonly id: string; readonly name?: string }[]
+        readonly models?: readonly ArasProviderModelEntry[]
+        readonly headers?: Readonly<Record<string, string>>
+        readonly defaultContextWindow?: number
+        readonly defaultMaxTokens?: number
+        readonly defaultInput?: readonly ('text' | 'image')[]
       },
   ): Promise<void> {
     const routeId = input.id.trim()
@@ -1059,33 +1369,203 @@ export class ArasHostBridge {
     }
     const ns = brandString<SettingsNamespace>('llm-pi-ai')
     if ('remove' in input) {
+      this.dismissedBuiltinRoutes.add(routeId)
       await settingsSvc.mutate(ns, [{ op: 'unset', path: ['providers', routeId] }])
+      await this.waitForProviderRoutes([routeId], false)
+      await this.refreshProviderNetworkBypass()
       return
     }
 
-    const profile: Record<string, unknown> = {}
-    if (input.displayName !== undefined && input.displayName.trim().length > 0) {
-      profile.displayName = input.displayName.trim()
+    this.dismissedBuiltinRoutes.delete(routeId)
+
+    // Merge over the stored profile so an edit keeps every field the caller did
+    // not resend. The UI renders only a subset of the schema, and treating an
+    // absent field as "unset it" would silently strip headers, compat switches,
+    // or image budgets the user configured elsewhere.
+    const stored = await this.readStoredProviderProfile(routeId)
+    const profile: Record<string, unknown> = { ...stored }
+
+    const assignText = (key: string, value: string | undefined): void => {
+      if (value === undefined) return
+      const trimmed = value.trim()
+      if (trimmed.length === 0) delete profile[key]
+      else profile[key] = trimmed
     }
-    if (input.api !== undefined && input.api.trim().length > 0) {
-      profile.api = input.api.trim()
-    }
-    if (input.baseURL !== undefined && input.baseURL.trim().length > 0) {
-      profile.baseURL = input.baseURL.trim()
-    }
-    if (input.apiKeyEnv !== undefined && input.apiKeyEnv.trim().length > 0) {
-      profile.apiKeyEnv = input.apiKeyEnv.trim()
-    }
-    if (input.models !== undefined && input.models.length > 0) {
-      profile.models = input.models
-        .filter(model => model.id.trim().length > 0)
-        .map(model => ({
-          id: model.id.trim(),
-          ...(model.name !== undefined && model.name.trim().length > 0 ? { name: model.name.trim() } : {}),
-        }))
+    assignText('displayName', input.displayName)
+    assignText('apiKeyEnv', input.apiKeyEnv)
+
+    if (input.api !== undefined) {
+      const trimmed = input.api.trim()
+      if (trimmed.length === 0) {
+        // Blank means "defer to the installed catalog", which is only valid on a
+        // catalog route; the validation below names the route when it is not.
+        delete profile.api
+      } else if (!(ARAS_SUPPORTED_PROTOCOLS as readonly string[]).includes(trimmed)) {
+        throw new Error(
+          `پروتکل «${trimmed}» پشتیبانی نمی‌شود. یکی از این مقادیر را انتخاب کنید: ${ARAS_SUPPORTED_PROTOCOLS.join('، ')}.`,
+        )
+      } else {
+        profile.api = trimmed
+      }
     }
 
-    await settingsSvc.mutate(ns, [{ op: 'set', path: ['providers', routeId], value: profile }])
+    if (input.baseURL !== undefined) {
+      const trimmed = input.baseURL.trim()
+      if (trimmed.length === 0) {
+        delete profile.baseURL
+      } else {
+        profile.baseURL = normalizeProviderBaseUrl(trimmed)
+      }
+    }
+
+    if (input.models !== undefined) {
+      const models = normalizeProviderModels(input.models)
+      if (models.length === 0) delete profile.models
+      else profile.models = models
+    }
+
+    if (input.headers !== undefined) {
+      const headers = normalizeProviderHeaders(input.headers)
+      if (Object.keys(headers).length === 0) delete profile.headers
+      else profile.headers = headers
+    }
+
+    const assignCount = (key: string, value: number | undefined): void => {
+      if (value === undefined) return
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new Error(`مقدار «${key}» باید یک عدد صحیح مثبت باشد.`)
+      }
+      profile[key] = value
+    }
+    assignCount('defaultContextWindow', input.defaultContextWindow)
+    assignCount('defaultMaxTokens', input.defaultMaxTokens)
+
+    if (input.defaultInput !== undefined) {
+      const modalities = [...new Set(input.defaultInput.filter(m => m === 'text' || m === 'image'))]
+      if (modalities.length === 0) delete profile.defaultInput
+      else profile.defaultInput = modalities
+    }
+
+    try {
+      await settingsSvc.mutate(ns, [{ op: 'set', path: ['providers', routeId], value: profile }])
+    } catch (error) {
+      throw this.explainProviderWriteFailure(routeId, error)
+    }
+    await this.waitForProviderRoutes([routeId], true)
+    await this.refreshProviderNetworkBypass()
+  }
+
+  /** Re-register every declared provider endpoint with the outbound network controller. */
+  private async refreshProviderNetworkBypass(): Promise<void> {
+    const settingsSvc = this.ctx.get('settings')
+    if (settingsSvc === undefined) return
+    const namespace = settingsSvc.describe().find(item => String(item.ns) === 'llm-pi-ai')
+    const value = namespace?.value
+    const providers = isPlainRecord(value) && isPlainRecord(value.providers) ? value.providers : {}
+    const urls: string[] = []
+    for (const profile of Object.values(providers)) {
+      if (isPlainRecord(profile) && typeof profile.baseURL === 'string' && profile.baseURL.length > 0) {
+        urls.push(profile.baseURL)
+      }
+    }
+    await this.networkController.setCustomProviderUrls(urls)
+  }
+
+  /**
+   * Read one stored `llm-pi-ai` provider profile as a plain record.
+   *
+   * Deliberately unredacted: this value is merged into the next write, so a
+   * redacted read would persist a placeholder over a real secret. Nothing here
+   * crosses a wire boundary — the snapshot readers redact on their own.
+   */
+  private async readStoredProviderProfile(routeId: string): Promise<Record<string, unknown>> {
+    const settingsSvc = this.ctx.get('settings')
+    if (settingsSvc === undefined) return {}
+    const namespace = settingsSvc.describe()
+      .find(item => String(item.ns) === 'llm-pi-ai')
+    const value = namespace?.value
+    if (!isPlainRecord(value) || !isPlainRecord(value.providers)) return {}
+    const profile = value.providers[routeId]
+    return isPlainRecord(profile) ? structuredClone(profile) : {}
+  }
+
+  /**
+   * Translate the adapter's validation failure into actionable guidance.
+   *
+   * `@deepseek-ai/dsh-llm-pi-ai` is the only authority on whether a profile is
+   * serviceable, and this package does not depend on it, so a rejected write is
+   * explained here rather than pre-empted: a route key that does not name an
+   * installed pi-ai provider must declare its protocol, endpoint, and models.
+   * @param routeId - route key the caller tried to write.
+   * @param error - rejection raised by the settings/adapter validation path.
+   * @returns the error to surface.
+   */
+  private explainProviderWriteFailure(routeId: string, error: unknown): Error {
+    const message = error instanceof Error ? error.message : String(error)
+    const missing: string[] = []
+    if (/needs an api/u.test(message)) missing.push('پروتکل API')
+    if (/needs a baseURL/u.test(message)) missing.push('نشانی Base URL')
+    if (/resolves no models|must be listed in configuration/u.test(message)) missing.push('فهرست مدل‌ها')
+    if (missing.length === 0) {
+      return new Error(`ثبت ارائه‌دهنده «${routeId}» انجام نشد: ${message}`)
+    }
+    return new Error(
+      `ارائه‌دهنده «${routeId}» در کاتالوگ نصب‌شده موجود نیست، بنابراین باید ${missing.join('، ')} را خودتان مشخص کنید. `
+      + 'یک شناسه دلخواه (مثلاً my-gateway)، نشانی کامل درگاه، پروتکل آن، و مدل‌های موجود را وارد کنید.',
+    )
+  }
+
+  private async waitForProviderRoutes(routeIds: readonly string[], shouldExist: boolean): Promise<void> {
+    const llm = this.ctx.get('llm')
+    if (llm === undefined || routeIds.length === 0) return
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const registered = new Set(llm.listProviders().map(item => item.id))
+      const settled = routeIds.every(id => registered.has(id) === shouldExist)
+      if (settled) return
+      await new Promise<void>(resolveDelay => setTimeout(resolveDelay, 50))
+    }
+  }
+
+  private async normalizeReasoningEffort(
+    provider: string,
+    model: string,
+    requested: string | undefined,
+  ): Promise<string | undefined> {
+    const trimmed = requested?.trim()
+    if (trimmed === undefined || trimmed.length === 0) return undefined
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) return trimmed
+    try {
+      const info = await llm.resolveModelInfo(provider, model)
+      if (info.reasoning === undefined) return undefined
+      if (info.reasoning.efforts.some(effort => String(effort.id) === trimmed)) {
+        return trimmed
+      }
+      return info.reasoning.defaultEffort === undefined
+        ? undefined
+        : String(info.reasoning.defaultEffort)
+    } catch {
+      return trimmed
+    }
+  }
+
+  private async sanitizeSavedDefaultSelection(): Promise<void> {
+    const defaults = this.ctx.get('agentDefaultModel')
+    if (defaults === undefined) return
+    const current = defaults.currentSelection()
+    if (current.reasoningEffort === undefined) return
+    const normalized = await this.normalizeReasoningEffort(
+      current.provider,
+      current.model,
+      String(current.reasoningEffort),
+    )
+    if (normalized !== String(current.reasoningEffort)) {
+      await defaults.saveSelection({
+        provider: current.provider,
+        model: current.model,
+        ...(normalized === undefined ? {} : { reasoningEffort: ReasoningEffortId(normalized) }),
+      })
+    }
   }
 
   /**
@@ -1106,6 +1586,87 @@ export class ArasHostBridge {
       const nextCwd = resolve(input.defaultCwd.trim())
       await mkdir(nextCwd, { recursive: true })
       this.defaultCwd = nextCwd
+    }
+  }
+
+  /**
+   * Update live outbound proxy / network mode (`auto`, `direct`, or `custom`).
+   * @param input - desired network mode and optional HTTP(S) proxy URL / NO_PROXY list.
+   */
+  async updateNetworkConfig(input: {
+    readonly mode: ArasNetworkMode
+    readonly customProxyUrl?: string
+    readonly noProxy?: string
+  }): Promise<void> {
+    await this.networkController.updateConfig(input)
+  }
+
+  /**
+   * Probe live outbound HTTPS reachability to diagnose 403 / proxy / TLS issues.
+   * @param targetUrl - optional target HTTPS URL (defaults to DeepSeek `/models`).
+   * @returns structured connectivity diagnostic result.
+   */
+  async testNetworkConnectivity(targetUrl?: string): Promise<ArasNetworkTestResult> {
+    return this.networkController.testConnectivity(targetUrl)
+  }
+
+  private readArchivedSessionIds(): Set<string> {
+    const ws = (this.ctx as unknown as { get(key: string): unknown }).get('workspaceRegistry') as
+      | { archivedSessionIds?: readonly SessionId[] }
+      | undefined
+    const out = new Set<string>()
+    try {
+      for (const id of ws?.archivedSessionIds ?? []) {
+        out.add(String(id))
+      }
+    } catch {
+      // Ignore if workspaceRegistry state is not initialized.
+    }
+    return out
+  }
+
+  private async ensureDeletedSessionsLoaded(): Promise<void> {
+    if (this.deletedSessionsLoaded) return
+    this.deletedSessionsLoaded = true
+    try {
+      const raw = await readFile(join(this.dshHomeDir, 'aras-deleted-sessions.json'), 'utf8')
+      const parsed = JSON.parse(raw) as unknown
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (typeof item === 'string' && item.length > 0) {
+            this.deletedSessionIds.add(item)
+          }
+        }
+      }
+    } catch {
+      // No deleted sessions file yet.
+    }
+  }
+
+  private async saveDeletedSessions(): Promise<void> {
+    const target = join(this.dshHomeDir, 'aras-deleted-sessions.json')
+    await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, `${JSON.stringify([...this.deletedSessionIds], null, 2)}\n`, 'utf8')
+  }
+
+  private async removePhysicalSessionDirs(sessionId: string): Promise<void> {
+    const sessionsRoot = join(this.dshHomeDir, 'sessions')
+    const encodedCandidates = new Set<string>([
+      sessionId,
+      encodeURIComponent(sessionId),
+    ])
+    try {
+      const projectDirs = await readdir(sessionsRoot, { withFileTypes: true })
+      for (const entry of projectDirs) {
+        if (!entry.isDirectory()) continue
+        for (const seg of encodedCandidates) {
+          if (!seg || seg.includes('/') || seg.includes('\\') || seg === '.' || seg === '..') continue
+          const candidatePath = join(sessionsRoot, entry.name, seg)
+          await rm(candidatePath, { recursive: true, force: true }).catch(() => {})
+        }
+      }
+    } catch {
+      // Sessions directory may not exist yet in in-memory test setups.
     }
   }
 
@@ -1244,13 +1805,18 @@ export class ArasHostBridge {
     let presetId: string | undefined
     const sessionQuery = this.ctx.get('sessionQuery')
     if (sessionQuery !== undefined) {
-      using obs = await sessionQuery.observeSession(sessionId)
-      if (obs.header.origin === 'subagent') {
-        throw new Error('این نشست متعلق به یک زیرعامل داخلی است.')
+      const obs = await sessionQuery.observeSession(sessionId)
+      try {
+        if (obs.header.origin === 'subagent') {
+          throw new Error('این نشست متعلق به یک زیرعامل داخلی است.')
+        }
+        presetId = obs.header.agentPreset
+      } finally {
+        obs[Symbol.dispose]()
       }
-      presetId = obs.header.agentPreset
     }
     const resolvedPreset = presets === undefined ? undefined : (await presets.resolve(presetId)).id
+    await this.sanitizeSavedDefaultSelection()
 
     const handle = await this.ctx.agents.resume({
       resumeSessionId: sessionId,

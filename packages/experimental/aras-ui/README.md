@@ -48,26 +48,36 @@ In `packages/bundle/web-app/cordis.patch.yml`, `dsh web` mounts `id: webserver` 
 
 To replace the default Web UI with **دستیار هوشمند ارس**, disable `web-runtime` (and `harness-dev-context`, which injects `webApp`) and add `@deepseek-ai/dsh-aras-ui`.
 
-### 1. Source checkout one-command override
+### 1. Source checkout one-command override (Isolated `aras` Profile)
 
-From the repository root:
+From the repository root, boot an isolated `aras` profile initialized from the shipped `web` template (this avoids loading stale third-party plugins installed inside `~/.dsh/profiles/web/`, while still sharing `$DSH_HOME` API keys, settings, and sessions):
 
 ```bash
-pnpm dsh web --patch packages/experimental/aras-ui/override-web.source.patch.yml
+pnpm dsh aras --from-default-profile web --patch packages/experimental/aras-ui/override-web.source.patch.yml
 ```
 
-On Windows (`cmd.exe` / Explorer), you can also run [`start-server.cmd`](../../../start-server.cmd) from the repository root to verify Node.js (`>= 24.9.0`), `pnpm`, workspace dependencies, and UI build artifacts automatically and choose between **`aras`** and **`dsh`**:
+On Windows (`cmd.exe` / Explorer), run [`start-server.cmd`](../../../start-server.cmd) or [`start-server-fast.cmd`](../../../start-server-fast.cmd) from the repository root:
+
+- Automatically initializes `%DSH_HOME%\profiles\aras` once via `--from-default-profile web` so legacy plugins in `~/.dsh/profiles/web/` (such as `easy-mcp`, `dshmarket`, `dsh-file-upload`, or `dsh-better-sidebar`) never run or emit startup errors.
+- Sets `NO_PROXY=localhost,127.0.0.1,::1,[::1]`, binds a dual-stack IPv4/IPv6 loopback listener (`127.0.0.1` + `[::1]`), and opens **`http://localhost:3080/`** so Windows System Proxy (`ProxyOverride = <local>`) and corporate HTTP proxies never intercept local UI traffic with `403 Access denied by security policy.`.
 
 ```bat
+rem Full setup & verification launcher:
 start-server.cmd
 start-server.cmd aras --port 3080
 start-server.cmd dsh --port 3080
+
+rem Instant launcher (skips all Node/pnpm/package checks and starts Aras UI immediately):
+start-server-fast.cmd
+start-server-fast.cmd dsh --port 3080
 ```
+
+`override-web.source.patch.yml`, `standalone.source.patch.yml`, and `cordis.patch.yml` also disable `hmr`, the Typert browser RPC stack, and the 70+ built-in React client UI plugins unused by Aras UI so source-mode startup avoids transpiling unused frontend packages while keeping all Harness core services, presets, orchestrator, and tools active.
 
 You can still pass standard `dsh web` flags such as `--port 3090` or `--no-open`:
 
 ```bash
-pnpm dsh web --patch packages/experimental/aras-ui/override-web.source.patch.yml --port 3090 --no-open
+pnpm dsh aras --patch packages/experimental/aras-ui/override-web.source.patch.yml --port 3090 --no-open
 ```
 
 ### 2. Permanent override via `~/.dsh/config.patch.yml` (or `.dsh/config.patch.yml`)
@@ -109,15 +119,39 @@ pnpm dsh web --patch packages/experimental/aras-ui/standalone.source.patch.yml -
 
 All endpoints live under `/aras-api`:
 
-- `GET /aras-api/stream` — SSE stream emitting `session/updated`, `stream/start`, `stream/chunk`, `stream/end`, `approval/pending`, `approval/resolved`, `question/pending`, `question/resolved`, and `settings/updated`.
+- `GET /aras-api/stream` — SSE stream emitting `session/updated`, `session/deleted`, `stream/start`, `stream/chunk`, `stream/end`, `approval/pending`, `approval/resolved`, `question/pending`, `question/resolved`, and `settings/updated`.
 - `GET /aras-api/sessions` — List recorded Harness sessions in the current workspace.
-- `GET /aras-api/sessions/:id` — Load projected RTL conversation history, pending approvals, and pending user questions.
+- `DELETE /aras-api/sessions` — Delete all non-subagent conversation sessions.
+- `GET /aras-api/sessions/:id` — Load projected RTL/LTR conversation history, pending approvals, and pending user questions.
+- `DELETE /aras-api/sessions/:id` — Cancel, dispose, archive, and permanently delete one conversation session.
 - `POST /aras-api/sessions/prompt` — Create or resume an `Agent` with the `default` orchestrator preset and submit text + optional images.
 - `POST /aras-api/sessions/:id/cancel` — Cancel the active turn (`agent.cancel('user')`).
 - `POST /aras-api/approvals/:id` — Resolve a tool approval waterfall (`allowed-once`, `rejected`, or `cancelled`).
 - `POST /aras-api/questions/:id` — Submit structured answers or cancel an `ask_user_question` prompt.
-- `GET /aras-api/settings` — Read active/default model selection, catalog models, credential statuses, custom providers, and agent preferences.
-- `POST /aras-api/settings/{model,credentials,providers/deepseek,providers/custom,preferences}` and `DELETE /aras-api/settings/providers/custom/:id` — Persist settings and credentials immediately.
+- `GET /aras-api/settings` — Read active/default model selection, catalog models, credential statuses, custom providers, outbound network/proxy status, and agent preferences.
+- `POST /aras-api/settings/{model,credentials,providers/deepseek,providers/custom,preferences,network}`, `POST /aras-api/settings/network/test`, and `DELETE /aras-api/settings/providers/custom/:id` — Persist settings, credentials, and live outbound HTTP/HTTPS proxy routing (`auto` / `direct` / `custom`) immediately without restart.
+
+<a id="custom-providers"></a>
+## Custom Providers and Arbitrary Base URLs
+
+`POST /aras-api/settings/providers/custom` accepts any provider endpoint, not only the ones the installed catalog ships. A route key does not have to name a pi-ai provider: when it does not, the profile is the whole provider declaration.
+
+| Field | Required for a hand-declared route | Notes |
+| --- | --- | --- |
+| `id` | yes | Lowercase letters, digits, `-`, `_`. Not a shipped route name. |
+| `baseURL` | yes | Any `http(s)` host, port, and path — LAN Ollama/vLLM, Azure, an internal gateway, a mirror. A missing scheme becomes `https`; a trailing slash is dropped. |
+| `api` | yes | One of `openai-completions`, `openai-responses`, `anthropic-messages`. |
+| `models` | yes | Bare ids, a comma-separated string, or entries carrying `contextWindow`, `maxTokens`, `input`, `tools`, `reasoning`. |
+| `apiKeyEnv` | no | Credential reference; omit for an unauthenticated local gateway. |
+| `headers` | no | Extra request headers (`X-Title`, `HTTP-Referer`, gateway tokens). |
+| `defaultContextWindow`, `defaultMaxTokens`, `defaultInput` | no | Route-wide fallbacks for models the entry itself does not size. |
+
+A route that *does* name a shipped provider (e.g. `openrouter`, `openai`, `anthropic`) may omit all three of `api`, `baseURL`, and `models` and inherit them from the catalog.
+
+Writes merge over the stored profile, so editing one field never erases the others, and a failed validation leaves the previous profile untouched.
+
+Endpoints on the operator's own network bypass the outbound proxy automatically: every declared `baseURL` whose host is loopback, RFC 1918 private, link-local, CGNAT, or a `.local` mDNS name is added to `NO_PROXY` when the provider list is read or written. A gateway at `http://192.168.1.50:8000` therefore never travels through a corporate tunnel that would answer `403 Access denied by security policy`, while public providers keep using the configured proxy. `baseURL` must be reachable **from the Harness host**, not from the browser.
+
 
 <a id="model-experience"></a>
 ## Model Experience

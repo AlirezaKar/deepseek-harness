@@ -1,18 +1,179 @@
 # Bundle patch for @deepseek-ai/dsh-aras-ui.
-# When applied over the `web` profile, disables the default React Web shell
-# runtime (`web-runtime`, `modules`, `client-hmr`, `harness-dev-context`) and
-# mounts the Aras Smart Assistant UI onto the shared webserver.
+# When applied over the `web` profile, disables the default React Web shell,
+# Typert browser RPC controllers, and client UI plugins, and mounts the Aras
+# Smart Assistant UI onto the shared webserver.
 
+- id: hmr
+  disabled: true
+- id: typert
+  disabled: true
+- id: typert-loader
+  disabled: true
+- id: typert-gateway
+  disabled: true
+- id: remote-access
+  disabled: true
 - id: web-runtime
   disabled: true
-
 - id: harness-dev-context
   disabled: true
-
+- id: client-hmr
+  disabled: true
 - id: modules
   disabled: true
-
-- id: client-hmr
+- id: connection
+  disabled: true
+- id: file-upload
+  disabled: true
+- id: api-remotes
+  disabled: true
+- id: cordis-client-runner
+  disabled: true
+- id: open-in-app
+  disabled: true
+- id: directory-picker
+  disabled: true
+- id: plugin-inventory
+  disabled: true
+- id: office-to-pdf
+  disabled: true
+- id: message-feedback
+  disabled: true
+- id: session-log-download
+  disabled: true
+- id: message-quotes
+  disabled: true
+- id: session-controller
+  disabled: true
+- id: job-controller
+  disabled: true
+- id: terminal-controller
+  disabled: true
+- id: workspace-files
+  disabled: true
+- id: account-controller
+  disabled: true
+- id: settings-controller
+  disabled: true
+- id: workspace-controller
+  disabled: true
+- id: product-analytics
+  disabled: true
+- id: ui-file-actions
+  disabled: true
+- id: ui-context-menu
+  disabled: true
+- id: ui-open-in-app
+  disabled: true
+- id: ui-settings-account
+  disabled: true
+- id: ui-theme
+  disabled: true
+- id: locale
+  disabled: true
+- id: shortcuts
+  disabled: true
+- id: ui-shortcuts
+  disabled: true
+- id: ui-layout
+  disabled: true
+- id: ui-renderer
+  disabled: true
+- id: ui-session
+  disabled: true
+- id: resources
+  disabled: true
+- id: ui-sidebar
+  disabled: true
+- id: ui-sidebar-right
+  disabled: true
+- id: ui-sidebar-documentpreview
+  disabled: true
+- id: ui-sidebar-browser
+  disabled: true
+- id: ui-sidebar-terminal
+  disabled: true
+- id: ui-sidebar-files
+  disabled: true
+- id: ui-settings
+  disabled: true
+- id: ui-settings-general
+  disabled: true
+- id: ui-settings-models
+  disabled: true
+- id: ui-plugin-manager
+  disabled: true
+- id: ui-settings-plugin-inventory
+  disabled: true
+- id: ui-conversation
+  disabled: true
+- id: ui-approval
+  disabled: true
+- id: ui-chat
+  disabled: true
+- id: ui-brand-official
+  disabled: true
+- id: ui-attachment
+  disabled: true
+- id: ui-file-drag
+  disabled: true
+- id: ui-tool
+  disabled: true
+- id: ui-cordis
+  disabled: true
+- id: ui-deliverables
+  disabled: true
+- id: ui-workspace
+  disabled: true
+- id: ui-workflow-run
+  disabled: true
+- id: ui-input-trigger
+  disabled: true
+- id: ui-commands
+  disabled: true
+- id: ui-skill
+  disabled: true
+- id: ui-agent-team
+  disabled: true
+- id: ui-subagent
+  disabled: true
+- id: ui-reference
+  disabled: true
+- id: ui-secret-mask
+  disabled: true
+- id: ui-jobs
+  disabled: true
+- id: ui-schedule
+  disabled: true
+- id: ui-goal
+  disabled: true
+- id: ui-message-feedback
+  disabled: true
+- id: ui-model-selection
+  disabled: true
+- id: ui-permission
+  disabled: true
+- id: ui-agent-preset
+  disabled: true
+- id: entry-customization
+  disabled: true
+- id: ui-settings-session-log
+  disabled: true
+- id: ui-settings-plugins
+  disabled: true
+- id: ui-settings-shell
+  disabled: true
+- id: ui-settings-agent-loop
+  disabled: true
+- id: ui-settings-subagent
+  disabled: true
+- id: ui-settings-web-search
+  disabled: true
+- id: ui-plan
+  disabled: true
+- id: ui-user-questions
+  disabled: true
+- id: ui-trajectory
   disabled: true
 
 - insert:
