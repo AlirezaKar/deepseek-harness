@@ -10,6 +10,30 @@ import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions'
 /** Policy applied by the Aras bridge when a tool requests human approval. */
 export type ArasApprovalMode = 'ask' | 'auto-allow' | 'never'
 
+/** Outbound HTTP/HTTPS network routing mode for LLM provider traffic. */
+export type ArasNetworkMode = 'auto' | 'direct' | 'custom'
+
+/** Live outbound network & proxy status surfaced in Aras Settings (`تنظیمات سامانه`). */
+export interface ArasNetworkStatus {
+  readonly mode: ArasNetworkMode
+  readonly customProxyUrl: string
+  readonly noProxy: string
+  readonly effectiveProxyUrl: string | null
+  readonly effectiveSource: 'none' | 'env' | 'windows-registry' | 'custom'
+  readonly windowsSystemProxy?: string
+  readonly warning?: string
+}
+
+/** Result of an on-demand outbound connectivity test from the Aras backend. */
+export interface ArasNetworkTestResult {
+  readonly reachable: boolean
+  readonly targetUrl: string
+  readonly status: number | null
+  readonly latencyMs: number
+  readonly effectiveProxyUrl: string | null
+  readonly summary: string
+}
+
 /** Summary of one persisted or live conversation session. */
 export interface ArasSessionSummary {
   readonly id: string
@@ -168,6 +192,7 @@ export interface ArasSettingsSnapshot {
     readonly approvalMode: ArasApprovalMode
     readonly defaultCwd: string
   }
+  readonly network: ArasNetworkStatus
   readonly settingsWritable: boolean
   readonly credentialsWritable: boolean
 }
@@ -177,6 +202,7 @@ export type ArasStreamEvent =
   | { readonly type: 'ready'; readonly timestamp: number }
   | { readonly type: 'session.status'; readonly sessionId: string; readonly status: 'idle' | 'running' }
   | { readonly type: 'session.updated'; readonly session: ArasSessionSummary }
+  | { readonly type: 'session.deleted'; readonly sessionId: string }
   | { readonly type: 'session.error'; readonly sessionId: string; readonly message: string }
   | {
     readonly type: 'stream.start'

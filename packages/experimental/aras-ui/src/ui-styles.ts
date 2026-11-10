@@ -342,10 +342,34 @@ button, input, textarea, select {
 
 .aras-subheader-right {
   justify-content: flex-start;
+  gap: 8px;
 }
 
 .aras-subheader-left {
   justify-content: flex-end;
+}
+
+.aras-subheader-delete-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: transparent;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.aras-subheader-delete-btn:hover,
+.aras-subheader-delete-btn.confirming {
+  background: var(--danger-soft);
+  border-color: var(--danger);
 }
 
 .aras-chat-subheader-title {
@@ -503,19 +527,36 @@ button, input, textarea, select {
 .aras-msg-row {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+}
+
+.aras-msg-user-wrap {
+  align-self: flex-start;
+  max-width: 82%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
 }
 
 .aras-msg-user {
-  align-self: flex-start;
-  max-width: 82%;
+  max-width: 100%;
   background: var(--user-bubble);
   border: 1px solid var(--user-bubble-border);
   padding: 12px 16px;
   border-radius: 16px 16px 4px 16px;
   color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.aras-msg-user-text {
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.82;
+  font-size: 14px;
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
 .aras-msg-images {
@@ -538,10 +579,10 @@ button, input, textarea, select {
   background: var(--assistant-bubble);
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
-  padding: 14px 18px;
+  padding: 16px 20px 14px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 13px;
   box-shadow: var(--shadow-sm);
 }
 
@@ -549,13 +590,93 @@ button, input, textarea, select {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11.5px;
-  color: var(--text-muted);
+  gap: 10px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.aras-msg-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.aras-msg-author-badge {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
 }
 
 .aras-msg-meta-model {
   direction: ltr;
+  unicode-bidi: isolate;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+}
+
+.aras-msg-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.aras-msg-user-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.72;
+  transition: opacity 0.15s ease;
+}
+
+.aras-msg-user-wrap:hover .aras-msg-user-actions {
+  opacity: 1;
+}
+
+.aras-copy-msg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.aras-copy-msg-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--accent-border);
+}
+
+.aras-copy-msg-btn.copied,
+.aras-code-copy-btn.copied {
+  color: var(--success) !important;
+  border-color: rgba(52, 211, 153, 0.45) !important;
+  background: var(--success-soft) !important;
 }
 
 /* Collapsible Reasoning & Tool Cards */
@@ -571,29 +692,35 @@ button, input, textarea, select {
 }
 
 .aras-collapse-card.reasoning {
-  border-right: 3px solid var(--accent);
+  border-inline-start: 3px solid var(--accent);
+  background: rgba(30, 102, 245, 0.055);
+}
+
+[data-theme="light"] .aras-collapse-card.reasoning {
+  background: rgba(30, 102, 245, 0.045);
 }
 
 .aras-collapse-card.tool-running {
-  border-right: 3px solid var(--warning);
+  border-inline-start: 3px solid var(--warning);
 }
 
 .aras-collapse-card.tool-completed {
-  border-right: 3px solid var(--success);
+  border-inline-start: 3px solid var(--success);
 }
 
 .aras-collapse-card.tool-error {
-  border-right: 3px solid var(--danger);
+  border-inline-start: 3px solid var(--danger);
 }
 
 .aras-collapse-header {
   width: 100%;
   border: none;
   background: transparent;
-  padding: 9px 13px;
+  padding: 10px 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   cursor: pointer;
   font-size: 12.5px;
   color: var(--text-secondary);
@@ -610,6 +737,64 @@ button, input, textarea, select {
   align-items: center;
   gap: 8px;
   font-weight: 600;
+  min-width: 0;
+}
+
+.aras-reasoning-header-main {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  flex: 1;
+}
+
+.aras-thinking-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.aras-thinking-icon.active {
+  animation: arasPulse 1.25s infinite ease-in-out;
+}
+
+.aras-reasoning-preview {
+  min-width: 0;
+  flex: 1;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: plaintext;
+}
+
+.aras-collapse-card.open .aras-reasoning-preview {
+  display: none;
+}
+
+.aras-reasoning-meta-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.aras-reasoning-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .aras-tool-name-code {
@@ -671,7 +856,27 @@ button, input, textarea, select {
 .aras-reasoning-text {
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.7;
+  line-height: 1.78;
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+
+.aras-reasoning-scroll {
+  max-height: 300px;
+  overflow-y: auto;
+  padding-inline-end: 4px;
+}
+
+.aras-reasoning-md {
+  font-size: 13px;
+  line-height: 1.78;
+  color: var(--text-secondary);
+}
+
+.aras-reasoning-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
 }
 
 .aras-tool-io-label {
@@ -703,10 +908,11 @@ button, input, textarea, select {
   word-break: break-word;
 }
 
-/* Markdown body (GFM Tables, Code Blocks, Blockquotes, Lists, Typography) */
+/* Markdown body (GFM Tables, Code Blocks, Blockquotes, Lists, Bidirectional Typography) */
 .aras-md {
   color: var(--text-primary);
-  line-height: 1.82;
+  font-size: 14.2px;
+  line-height: 1.88;
   word-break: break-word;
   overflow-wrap: anywhere;
 }
@@ -721,6 +927,8 @@ button, input, textarea, select {
 
 .aras-md p {
   margin: 0 0 11px;
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
 .aras-md h1,
@@ -733,22 +941,27 @@ button, input, textarea, select {
   font-weight: 700;
   line-height: 1.45;
   color: var(--text-primary);
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
-.aras-md h1 { font-size: 1.38em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 6px; }
-.aras-md h2 { font-size: 1.24em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 5px; }
-.aras-md h3 { font-size: 1.12em; }
+.aras-md h1 { font-size: 1.36em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 6px; }
+.aras-md h2 { font-size: 1.22em; border-bottom: 1px solid var(--border-subtle); padding-bottom: 5px; }
+.aras-md h3 { font-size: 1.11em; }
 .aras-md h4 { font-size: 1.03em; }
 .aras-md h5, .aras-md h6 { font-size: 0.96em; color: var(--text-secondary); }
 
 .aras-md ul,
 .aras-md ol {
-  padding-right: 24px;
+  padding-inline-start: 24px;
+  padding-inline-end: 0;
   margin: 0 0 12px;
 }
 
 .aras-md li {
-  margin-bottom: 4px;
+  margin-bottom: 5px;
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
 .aras-md li:last-child {
@@ -760,7 +973,7 @@ button, input, textarea, select {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  margin-right: -18px;
+  margin-inline-start: -18px;
 }
 
 .aras-md li.aras-task-item input[type="checkbox"] {
@@ -771,10 +984,12 @@ button, input, textarea, select {
 .aras-md blockquote {
   margin: 12px 0;
   padding: 10px 14px;
-  border-right: 3px solid var(--accent);
-  border-radius: 8px 0 0 8px;
+  border-inline-start: 3px solid var(--accent);
+  border-radius: 8px;
   background: var(--accent-soft);
   color: var(--text-secondary);
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
 .aras-md blockquote p:last-child {
@@ -791,6 +1006,7 @@ button, input, textarea, select {
   color: var(--accent);
   text-decoration: underline;
   text-underline-offset: 3px;
+  unicode-bidi: isolate;
 }
 
 .aras-md a:hover {
@@ -804,7 +1020,7 @@ button, input, textarea, select {
 
 .aras-md code.inline {
   direction: ltr;
-  unicode-bidi: embed;
+  unicode-bidi: isolate;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12.5px;
   padding: 1px 6px;
@@ -888,7 +1104,8 @@ button, input, textarea, select {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-strong);
   border-left: 1px solid var(--border-subtle);
-  text-align: right;
+  text-align: start;
+  unicode-bidi: plaintext;
   white-space: nowrap;
 }
 
@@ -903,6 +1120,8 @@ button, input, textarea, select {
   border-left: 1px solid var(--border-subtle);
   color: var(--text-primary);
   vertical-align: top;
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
 .aras-md tbody tr:last-child td {
@@ -1107,7 +1326,8 @@ button, input, textarea, select {
   min-height: 24px;
   line-height: 24px;
   padding: 4px 2px;
-  text-align: right;
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
 .aras-composer-input::placeholder {
@@ -1274,6 +1494,7 @@ button, input, textarea, select {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 13px 16px;
   border-radius: 11px;
   background: var(--bg-elevated);
@@ -1285,6 +1506,47 @@ button, input, textarea, select {
 .aras-session-item:hover {
   border-color: var(--accent-border);
   background: var(--bg-hover);
+}
+
+.aras-session-item-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.aras-session-item-title {
+  font-weight: 700;
+  unicode-bidi: plaintext;
+  text-align: start;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aras-session-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.aras-session-delete-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.aras-session-delete-btn:hover {
+  background: var(--danger-soft);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: var(--danger);
 }
 
 .aras-toast {
@@ -1346,7 +1608,11 @@ button, input, textarea, select {
   .aras-sidebar,
   .aras-composer-wrap,
   .aras-pdf-btn,
+  .aras-subheader-delete-btn,
   .aras-subheader-model-pill,
+  .aras-msg-actions,
+  .aras-msg-user-actions,
+  .aras-reasoning-toolbar,
   .aras-code-copy-btn {
     display: none !important;
   }

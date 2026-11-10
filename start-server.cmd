@@ -220,10 +220,24 @@ if not defined NODE_COMPILE_CACHE (
 )
 if not exist "%NODE_COMPILE_CACHE%" mkdir "%NODE_COMPILE_CACHE%" >nul 2>&1
 
+rem Ensure loopback traffic never traverses system/corporate HTTP proxies (prevents 403 on 127.0.0.1)
+if defined NO_PROXY (
+    set "NO_PROXY=localhost,127.0.0.1,::1,[::1],%NO_PROXY%"
+) else (
+    set "NO_PROXY=localhost,127.0.0.1,::1,[::1]"
+)
+set "no_proxy=%NO_PROXY%"
+
+set "BROWSER_HOST=%HOST%"
+if "%HOST%"=="127.0.0.1" set "BROWSER_HOST=localhost"
+if "%HOST%"=="::1" set "BROWSER_HOST=localhost"
+if "%HOST%"=="0.0.0.0" set "BROWSER_HOST=localhost"
+if "%HOST%"=="::" set "BROWSER_HOST=localhost"
+
 echo.
 echo ======================================================================
-if /i "%UI_MODE%"=="aras" echo   Starting Aras Smart Assistant UI on http://%HOST%:%PORT%/
-if /i "%UI_MODE%"=="dsh"  echo   Starting DeepSeek Harness Default Web UI on http://%HOST%:%PORT%/
+if /i "%UI_MODE%"=="aras" echo   Starting Aras Smart Assistant UI on http://%BROWSER_HOST%:%PORT%/  ^(bind %HOST%:%PORT%^)
+if /i "%UI_MODE%"=="dsh"  echo   Starting DeepSeek Harness Default Web UI on http://%BROWSER_HOST%:%PORT%/  ^(bind %HOST%:%PORT%^)
 echo   Compile cache : %NODE_COMPILE_CACHE%
 echo   Booting TypeScript runtime ^(first run populates cache; next runs start much faster^)...
 echo   Press Ctrl+C to stop the server.
@@ -234,23 +248,27 @@ if /i "%UI_MODE%"=="aras" goto :launch_aras
 goto :launch_dsh
 
 :launch_aras
-set "BROWSER_HOST=%HOST%"
-if "%HOST%"=="0.0.0.0" set "BROWSER_HOST=127.0.0.1"
-if "%HOST%"=="::" set "BROWSER_HOST=127.0.0.1"
-if "%NO_OPEN%"=="0" start "" /b node -e "const http=require('node:http'),cp=require('node:child_process'),u='http://%BROWSER_HOST%:%PORT%/';let n=0;const t=setInterval(function(){if(++n>=150)return clearInterval(t);const r=http.get(u,function(res){if(res.statusCode===200){clearInterval(t);cp.exec('cmd /c start '+u);}res.resume();});r.on('error',function(){});},400);"
+rem Initialize the isolated "aras" profile once, from the shipped "web" template.
+rem $DSH_HOME is resolved exactly like @deepseek-ai/dsh-home-paths: blank -> %USERPROFILE%\.dsh,
+rem leading "~" -> the user profile, and a relative path -> absolute from the current directory.
+set "ARAS_PROFILE_INIT="
+node -e "const fs=require('node:fs'),p=require('node:path'),os=require('node:os');let h=String(process.env.DSH_HOME||'').trim();if(!h){h=p.join(os.homedir(),'.dsh');}else if(h==='~'){h=os.homedir();}else if(h.indexOf('~/')===0||h.indexOf('~\\')===0){h=p.join(os.homedir(),h.slice(2));}process.exit(fs.existsSync(p.join(p.resolve(h),'profiles','aras','package.json'))?0:1);"
+if errorlevel 1 set "ARAS_PROFILE_INIT=--from-default-profile web"
+
+if "%NO_OPEN%"=="0" start "" /b node -e "const http=require('node:http'),cp=require('node:child_process'),u='http://%BROWSER_HOST%:%PORT%/';let n=0;const t=setInterval(function(){if(++n>=150)return clearInterval(t);const r=http.get({hostname:'%BROWSER_HOST%',port:%PORT%,path:'/',agent:false},function(res){if(res.statusCode===200){clearInterval(t);cp.exec('cmd /c start '+u);}res.resume();});r.on('error',function(){});},400);"
 
 rem Wildcard 0.0.0.0 / :: uses standalone HTTP mode because dsh-host-webserver rejects wildcard binds
 if "%HOST%"=="0.0.0.0" goto :launch_aras_standalone
 if "%HOST%"=="::" goto :launch_aras_standalone
 
-node --import tsx/esm apps/cli/src/bin.ts web --patch ./packages/experimental/aras-ui/override-web.source.patch.yml --host "%HOST%" --port "%PORT%" --no-open
+node --import tsx/esm apps/cli/src/bin.ts aras %ARAS_PROFILE_INIT% --patch ./packages/experimental/aras-ui/override-web.source.patch.yml --host "%HOST%" --port "%PORT%" --no-open
 set "EXIT_CODE=%ERRORLEVEL%"
 goto :finish
 
 :launch_aras_standalone
 set "ARAS_UI_HOST=%HOST%"
 set "ARAS_UI_PORT=%PORT%"
-node --import tsx/esm apps/cli/src/bin.ts web --patch ./packages/experimental/aras-ui/standalone.source.patch.yml --no-open
+node --import tsx/esm apps/cli/src/bin.ts aras %ARAS_PROFILE_INIT% --patch ./packages/experimental/aras-ui/standalone.source.patch.yml --no-open
 set "EXIT_CODE=%ERRORLEVEL%"
 goto :finish
 

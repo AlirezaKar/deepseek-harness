@@ -159,8 +159,18 @@ export function renderArasIndexHtml(): string {
             <div class="aras-chat-subheader">
               <div class="aras-subheader-side aras-subheader-right">
                 <button type="button" id="aras-pdf-btn" class="aras-pdf-btn">خروجی PDF</button>
+                <button type="button" id="aras-delete-active-chat-btn" class="aras-subheader-delete-btn" style="display:none;" title="حذف این گفتگو" aria-label="حذف این گفتگو">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="3 6 5 6 21 6"></polyline>
+                    <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"></path>
+                    <path d="M10 11v6"></path>
+                    <path d="M14 11v6"></path>
+                    <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"></path>
+                  </svg>
+                  <span data-del-label="1">حذف</span>
+                </button>
               </div>
-              <div id="aras-chat-title" class="aras-chat-subheader-title">گفتگوی جدید</div>
+              <div id="aras-chat-title" class="aras-chat-subheader-title" dir="auto">گفتگوی جدید</div>
               <div class="aras-subheader-side aras-subheader-left">
                 <button type="button" id="aras-active-model-pill" class="aras-subheader-model-pill" title="تغییر مدل هوش مصنوعی در تنظیمات">deepseek-official / deepseek-flash</button>
               </div>
@@ -201,8 +211,8 @@ export function renderArasIndexHtml(): string {
                   </svg>
                 </button>
 
-                <!-- Middle: Expanding RTL Textarea -->
-                <textarea id="aras-composer-input" class="aras-composer-input" rows="1" maxlength="10000" placeholder="منتظر سوال شما هستم"></textarea>
+                <!-- Middle: Expanding Bidirectional Textarea -->
+                <textarea id="aras-composer-input" class="aras-composer-input" dir="auto" rows="1" maxlength="10000" placeholder="منتظر سوال شما هستم"></textarea>
 
                 <!-- Leftmost in RTL: + Attachment Button -->
                 <button type="button" id="aras-attach-btn" class="aras-attach-btn" title="افزودن تصویر" aria-label="افزودن تصویر">+</button>
@@ -222,7 +232,10 @@ export function renderArasIndexHtml(): string {
             <div class="aras-page-container">
               <div class="aras-page-header">
                 <h2 class="aras-page-title">گفتگوهای پیشین</h2>
-                <button type="button" class="aras-btn primary" data-nav-tab="new-chat">+ گفتگوی جدید</button>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                  <button type="button" id="aras-delete-all-sessions-btn" class="aras-btn danger" style="display:none;">حذف همه گفتگوها</button>
+                  <button type="button" class="aras-btn primary" data-nav-tab="new-chat">+ گفتگوی جدید</button>
+                </div>
               </div>
               <div id="aras-sessions-list" style="display:flex;flex-direction:column;gap:10px;"></div>
             </div>

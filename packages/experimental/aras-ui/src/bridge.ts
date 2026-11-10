@@ -7,8 +7,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type AgentOptions, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -28,6 +28,7 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import { UserQuestionError, type AskUserQuestionAnswer, type AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
+import { ArasNetworkController, resolveArasDshHome } from './network.ts'
 import type {
   ArasApprovalMode,
   ArasCredentialStatus,
@@ -35,6 +36,8 @@ import type {
   ArasImageAttachmentView,
   ArasLiveStreamState,
   ArasModelEntry,
+  ArasNetworkMode,
+  ArasNetworkTestResult,
   ArasPendingApproval,
   ArasPendingQuestion,
   ArasProviderCatalogGroup,
@@ -333,6 +336,7 @@ function syncAssistantTools(
  * clarifying questions, and settings/credential management.
  */
 export class ArasHostBridge {
+  private readonly ctx: Context
   private approvalMode: ArasApprovalMode
   private defaultCwd: string
   private readonly ownedHandles = new Map<string, AgentHandle>()
@@ -344,6 +348,10 @@ export class ArasHostBridge {
   private readonly subscribers = new Set<(event: ArasStreamEvent) => void>()
   private readonly disposers: (() => void)[] = []
   private readonly dismissedBuiltinRoutes = new Set<string>()
+  private readonly deletedSessionIds = new Set<string>()
+  private deletedSessionsLoaded = false
+  private readonly dshHomeDir: string
+  private readonly networkController: ArasNetworkController
   private readonly lifetime = new AbortController()
 
   /**
@@ -352,11 +360,17 @@ export class ArasHostBridge {
    * @param options - resolved initial bridge configuration.
    */
   constructor(
-    private readonly ctx: Context,
+    ctx: Context,
     options?: Partial<ArasBridgeOptions>,
   ) {
+    this.ctx = ctx
     this.approvalMode = options?.defaultApprovalPolicy ?? 'ask'
     this.defaultCwd = resolve(options?.defaultCwd ?? process.cwd())
+    this.dshHomeDir = resolveArasDshHome()
+    this.networkController = new ArasNetworkController(this.dshHomeDir)
+    void this.networkController.ensureInitialized().catch((err) => {
+      this.ctx.logger.warn(`aras-ui network init warning: ${String(err)}`)
+    })
 
     this.disposers.push(ctx.on('agent/assistant-stream', ({ agent, frame }) => {
       if (agent.session.header.origin === 'subagent') return
@@ -520,7 +534,14 @@ export class ArasHostBridge {
 
     this.disposers.push(ctx.on('agent/error', ({ agent, error }) => {
       if (agent.session.header.origin === 'subagent') return
-      const message = error instanceof Error ? error.message : String(error)
+      const rawMessage = error instanceof Error ? error.message : String(error)
+      let message = rawMessage
+      if (/\b403\b|access denied by security policy|forbidden/iu.test(rawMessage)) {
+        const isPolicy = /security policy/iu.test(rawMessage)
+        message = isPolicy
+          ? `${rawMessage}\n(راهنما: خطای ۴۰۳ ناشی از پراکسی/فایروال شبکه است. از بخش «تنظیمات سامانه ← شبکه و پراکسی» حالت را روی «اتصال مستقیم» یا پورت VPN محلی قرار دهید.)`
+          : `${rawMessage}\n(راهنما: خطای ۴۰۳ از سمت ارائه‌دهنده مدل دریافت شد. از بخش «تنظیمات سامانه ← شبکه و پراکسی» اتصال VPN یا پراکسی دستی را بررسی و تست کنید.)`
+      }
       this.broadcast({
         type: 'session.error',
         sessionId: String(agent.session.id),
@@ -637,6 +658,8 @@ export class ArasHostBridge {
    * @returns summaries of live and persisted sessions.
    */
   async listSessions(): Promise<ArasSessionSummary[]> {
+    await this.ensureDeletedSessionsLoaded()
+    const archivedIds = this.readArchivedSessionIds()
     const byId = new Map<string, ArasSessionSummary>()
 
     const persistence = this.ctx.get('sessionPersistence')
@@ -646,6 +669,7 @@ export class ArasHostBridge {
         const header = snap.header
         if (header.origin === 'subagent') continue
         const id = String(header.id)
+        if (this.deletedSessionIds.has(id) || archivedIds.has(id)) continue
         byId.set(id, {
           id,
           title: this.customTitles.get(id) ?? `گفتگو ${id.slice(-6)}`,
@@ -658,7 +682,9 @@ export class ArasHostBridge {
 
     for (const session of this.ctx.sessions.list()) {
       if (session.header.origin === 'subagent') continue
-      byId.set(String(session.id), this.summarizeLiveSession(session))
+      const id = String(session.id)
+      if (this.deletedSessionIds.has(id) || archivedIds.has(id)) continue
+      byId.set(id, this.summarizeLiveSession(session))
     }
 
     return [...byId.values()].sort((left, right) => right.createdAt - left.createdAt)
@@ -703,8 +729,93 @@ export class ArasHostBridge {
    * @returns session detail snapshot.
    */
   async getSessionDetail(rawId: string): Promise<ArasSessionDetail> {
+    await this.ensureDeletedSessionsLoaded()
+    if (this.deletedSessionIds.has(rawId)) {
+      throw Object.assign(new Error('گفتگوی مورد نظر یافت نشد یا قبلاً حذف شده است.'), { statusCode: 404 })
+    }
     const agent = await this.ensureLiveAgent(rawId)
     return this.detailForAgent(agent)
+  }
+
+  /**
+   * Delete a conversation session: cancel active work, dispose live agent handle,
+   * archive in workspaceRegistry (if mounted), and remove persisted JSONL artifacts.
+   * @param rawId - session id to delete.
+   * @returns `{ deleted: true }` once removed.
+   */
+  async deleteSession(rawId: string): Promise<{ readonly deleted: boolean }> {
+    const trimmed = rawId.trim()
+    if (!trimmed) {
+      throw new Error('شناسه گفتگو نامعتبر است.')
+    }
+    await this.ensureDeletedSessionsLoaded()
+    const brandedId = brandString<SessionId>(trimmed)
+
+    // 1. Cancel any active turn and resolve pending interactive waits for this session.
+    const liveAgent = this.ctx.agents.get(brandedId)
+    liveAgent?.cancel({ kind: 'user' })
+
+    for (const entry of [...this.pendingApprovals.values()]) {
+      if (entry.view.sessionId === trimmed) {
+        entry.resolve('cancelled')
+      }
+    }
+    for (const entry of [...this.pendingQuestions.values()]) {
+      if (entry.view.sessionId === trimmed) {
+        entry.reject(new UserQuestionError('گفتگو توسط کاربر حذف شد', 'ASK_CANCELLED'))
+      }
+    }
+
+    // 2. Archive in workspaceRegistry if present so other DSH surfaces also hide it.
+    const ws = (this.ctx as unknown as { get(key: string): unknown }).get('workspaceRegistry') as
+      | { archiveSession?: (id: SessionId, opts?: { stopActivity?: boolean }) => Promise<void> }
+      | undefined
+    if (ws?.archiveSession !== undefined) {
+      try {
+        await ws.archiveSession(brandedId, { stopActivity: true })
+      } catch {
+        // Ignore unknown/untracked workspace registry errors.
+      }
+    }
+
+    // 3. Dispose owned AgentHandle (closes JSONL write handle & detaches Session).
+    const owned = this.ownedHandles.get(trimmed)
+    if (owned !== undefined) {
+      this.ownedHandles.delete(trimmed)
+      try {
+        await owned.dispose()
+      } catch {
+        // Continue cleanup even if handle teardown warns.
+      }
+    }
+
+    // 4. Clean memory indices, persist deletion marker, and remove JSONL directory on disk.
+    this.liveStreams.delete(trimmed)
+    this.customTitles.delete(trimmed)
+    for (const key of [...this.attachmentRefs.keys()]) {
+      if (key.startsWith(`${trimmed}:`)) this.attachmentRefs.delete(key)
+    }
+
+    this.deletedSessionIds.add(trimmed)
+    await this.saveDeletedSessions()
+    await this.removePhysicalSessionDirs(trimmed)
+
+    this.broadcast({ type: 'session.deleted', sessionId: trimmed })
+    return { deleted: true }
+  }
+
+  /**
+   * Delete all non-subagent conversation sessions listed by the bridge.
+   * @returns count of deleted sessions.
+   */
+  async deleteAllSessions(): Promise<{ readonly deletedCount: number }> {
+    const existing = await this.listSessions()
+    let deletedCount = 0
+    for (const item of existing) {
+      await this.deleteSession(item.id)
+      deletedCount += 1
+    }
+    return { deletedCount }
   }
 
   /**
@@ -961,6 +1072,8 @@ export class ArasHostBridge {
       }
     }
 
+    const network = await this.networkController.getStatus()
+
     return {
       defaultModel: defaultSel,
       catalog: groups,
@@ -972,6 +1085,7 @@ export class ArasHostBridge {
         approvalMode: this.approvalMode,
         defaultCwd: this.defaultCwd,
       },
+      network,
       settingsWritable: settingsSvc?.writable ?? false,
       credentialsWritable: credentialsSvc !== undefined,
     }
@@ -1233,6 +1347,87 @@ export class ArasHostBridge {
   }
 
   /**
+   * Update live outbound proxy / network mode (`auto`, `direct`, or `custom`).
+   * @param input - desired network mode and optional HTTP(S) proxy URL / NO_PROXY list.
+   */
+  async updateNetworkConfig(input: {
+    readonly mode: ArasNetworkMode
+    readonly customProxyUrl?: string
+    readonly noProxy?: string
+  }): Promise<void> {
+    await this.networkController.updateConfig(input)
+  }
+
+  /**
+   * Probe live outbound HTTPS reachability to diagnose 403 / proxy / TLS issues.
+   * @param targetUrl - optional target HTTPS URL (defaults to DeepSeek `/models`).
+   * @returns structured connectivity diagnostic result.
+   */
+  async testNetworkConnectivity(targetUrl?: string): Promise<ArasNetworkTestResult> {
+    return this.networkController.testConnectivity(targetUrl)
+  }
+
+  private readArchivedSessionIds(): Set<string> {
+    const ws = (this.ctx as unknown as { get(key: string): unknown }).get('workspaceRegistry') as
+      | { archivedSessionIds?: readonly SessionId[] }
+      | undefined
+    const out = new Set<string>()
+    try {
+      for (const id of ws?.archivedSessionIds ?? []) {
+        out.add(String(id))
+      }
+    } catch {
+      // Ignore if workspaceRegistry state is not initialized.
+    }
+    return out
+  }
+
+  private async ensureDeletedSessionsLoaded(): Promise<void> {
+    if (this.deletedSessionsLoaded) return
+    this.deletedSessionsLoaded = true
+    try {
+      const raw = await readFile(join(this.dshHomeDir, 'aras-deleted-sessions.json'), 'utf8')
+      const parsed = JSON.parse(raw) as unknown
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (typeof item === 'string' && item.length > 0) {
+            this.deletedSessionIds.add(item)
+          }
+        }
+      }
+    } catch {
+      // No deleted sessions file yet.
+    }
+  }
+
+  private async saveDeletedSessions(): Promise<void> {
+    const target = join(this.dshHomeDir, 'aras-deleted-sessions.json')
+    await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, `${JSON.stringify([...this.deletedSessionIds], null, 2)}\n`, 'utf8')
+  }
+
+  private async removePhysicalSessionDirs(sessionId: string): Promise<void> {
+    const sessionsRoot = join(this.dshHomeDir, 'sessions')
+    const encodedCandidates = new Set<string>([
+      sessionId,
+      encodeURIComponent(sessionId),
+    ])
+    try {
+      const projectDirs = await readdir(sessionsRoot, { withFileTypes: true })
+      for (const entry of projectDirs) {
+        if (!entry.isDirectory()) continue
+        for (const seg of encodedCandidates) {
+          if (!seg || seg.includes('/') || seg.includes('\\') || seg === '.' || seg === '..') continue
+          const candidatePath = join(sessionsRoot, entry.name, seg)
+          await rm(candidatePath, { recursive: true, force: true }).catch(() => {})
+        }
+      }
+    } catch {
+      // Sessions directory may not exist yet in in-memory test setups.
+    }
+  }
+
+  /**
    * Tear down listeners, abort pending interactive waits, and dispose bridge-owned Agent handles.
    */
   async dispose(): Promise<void> {
@@ -1367,11 +1562,15 @@ export class ArasHostBridge {
     let presetId: string | undefined
     const sessionQuery = this.ctx.get('sessionQuery')
     if (sessionQuery !== undefined) {
-      using obs = await sessionQuery.observeSession(sessionId)
-      if (obs.header.origin === 'subagent') {
-        throw new Error('این نشست متعلق به یک زیرعامل داخلی است.')
+      const obs = await sessionQuery.observeSession(sessionId)
+      try {
+        if (obs.header.origin === 'subagent') {
+          throw new Error('این نشست متعلق به یک زیرعامل داخلی است.')
+        }
+        presetId = obs.header.agentPreset
+      } finally {
+        obs[Symbol.dispose]()
       }
-      presetId = obs.header.agentPreset
     }
     const resolvedPreset = presets === undefined ? undefined : (await presets.resolve(presetId)).id
     await this.sanitizeSavedDefaultSelection()

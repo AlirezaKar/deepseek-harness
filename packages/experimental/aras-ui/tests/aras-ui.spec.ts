@@ -17,6 +17,7 @@ import {
   createArasFallbackHandler,
   renderArasIndexHtml,
 } from '../src/index.ts'
+import { normalizeHttpProxyUrl, parseWindowsProxyServerValue } from '../src/network.ts'
 import { ARAS_UI_SCRIPT } from '../src/ui-script.ts'
 
 describe('@deepseek-ai/dsh-aras-ui', () => {
@@ -50,6 +51,8 @@ describe('@deepseek-ai/dsh-aras-ui', () => {
     expect(html).toContain('۰ / ۱۰,۰۰۰ کاراکتر')
     expect(html).toContain('aras-subheader-right')
     expect(html).toContain('aras-subheader-left')
+    expect(html).toContain('id="aras-delete-active-chat-btn"')
+    expect(html).toContain('id="aras-delete-all-sessions-btn"')
     expect(html).toContain('id="aras-settled-list"')
     expect(html).toContain('id="aras-live-slot"')
     expect(html).not.toContain('arasFadeIn')
@@ -77,6 +80,12 @@ describe('@deepseek-ai/dsh-aras-ui', () => {
     expect(typeof win.__arasRenderMarkdown).toBe('function')
 
     const rendered = win.__arasRenderMarkdown!([
+      'سلام دنیا با کد `127.0.0.1:3080`',
+      '',
+      '- مورد فارسی اول',
+      '',
+      '1. English step one',
+      '',
       '| ستون اول | ستون دوم | کد |',
       '| :--- | :---: | ---: |',
       '| **ردیف ۱** | مقدار \\| تست | `x | y` |',
@@ -84,6 +93,9 @@ describe('@deepseek-ai/dsh-aras-ui', () => {
       '```ts',
       'const answer = 42',
     ].join('\n'))
+    expect(rendered).toContain('<p dir="auto">سلام دنیا با کد <code class="inline">127.0.0.1:3080</code></p>')
+    expect(rendered).toContain('<ul dir="rtl"><li dir="auto">مورد فارسی اول</li></ul>')
+    expect(rendered).toContain('<ol dir="ltr"><li dir="auto">English step one</li></ol>')
     expect(rendered).toContain('<div class="aras-table-wrap"><table>')
     expect(rendered).toContain('<th style="text-align:center;">ستون دوم</th>')
     expect(rendered).toContain('<strong>ردیف ۱</strong>')
@@ -212,6 +224,9 @@ describe('@deepseek-ai/dsh-aras-ui', () => {
 
   it('serves settings, custom providers, tool approvals, and user questions over HTTP', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'aras-ui-test-'))
+    // Keep `$DSH_HOME` (network config, deleted-session registry, session dirs) inside the test sandbox.
+    const previousDshHome = process.env.DSH_HOME
+    process.env.DSH_HOME = tempRoot
     const ctx = new Context()
     await ctx.plugin(SessionStore)
 
@@ -280,6 +295,8 @@ describe('@deepseek-ai/dsh-aras-ui', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()))
       await ctx.fiber.dispose()
       await rm(tempRoot, { recursive: true, force: true })
+      if (previousDshHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousDshHome
     })
 
     // 1. HTML shell fallback
@@ -401,7 +418,93 @@ describe('@deepseek-ai/dsh-aras-ui', () => {
     }
     expect(updatedPref.preferences.approvalMode).toBe('auto-allow')
 
+    // 6. Network proxy configuration & 403 diagnostic probe
+    expect(normalizeHttpProxyUrl('127.0.0.1:10809')).toBe('http://127.0.0.1:10809')
+    expect(parseWindowsProxyServerValue('http=127.0.0.1:10809;https=127.0.0.1:10809;socks=127.0.0.1:10808')).toEqual({
+      proxyUrl: 'http://127.0.0.1:10809',
+    })
+
+    const directNetRes = await fetch(`${baseUrl}/aras-api/settings/network`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'direct' }),
+    })
+    expect(directNetRes.status).toBe(200)
+    const directNetSnap = (await directNetRes.json()) as {
+      network: { mode: string; effectiveProxyUrl: string | null }
+    }
+    expect(directNetSnap.network.mode).toBe('direct')
+    expect(directNetSnap.network.effectiveProxyUrl).toBeNull()
+
+    const diagServer = createServer((req, res) => {
+      if (req.url === '/blocked') {
+        res.writeHead(403, { 'content-type': 'text/plain' })
+        res.end('Access denied by security policy.')
+        return
+      }
+      res.writeHead(401, { 'content-type': 'application/json' })
+      res.end('{"error":"missing bearer token"}')
+    })
+    await new Promise<void>((resolve) => diagServer.listen(0, '127.0.0.1', () => resolve()))
+    cleanups.push(async () => {
+      await new Promise<void>((resolve) => diagServer.close(() => resolve()))
+    })
+    const diagPort = (diagServer.address() as AddressInfo).port
+
+    const okProbeRes = await fetch(`${baseUrl}/aras-api/settings/network/test`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ targetUrl: `http://127.0.0.1:${String(diagPort)}/models` }),
+    })
+    expect(okProbeRes.status).toBe(200)
+    const okProbe = (await okProbeRes.json()) as { reachable: boolean; status: number }
+    expect(okProbe.reachable).toBe(true)
+    expect(okProbe.status).toBe(401)
+
+    const blockedProbeRes = await fetch(`${baseUrl}/aras-api/settings/network/test`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ targetUrl: `http://127.0.0.1:${String(diagPort)}/blocked` }),
+    })
+    expect(blockedProbeRes.status).toBe(200)
+    const blockedProbe = (await blockedProbeRes.json()) as { reachable: boolean; status: number; summary: string }
+    expect(blockedProbe.reachable).toBe(false)
+    expect(blockedProbe.status).toBe(403)
+    expect(blockedProbe.summary).toContain('Access denied by security policy')
+
+    // 7. Session deletion (`DELETE /aras-api/sessions/:id`)
+    const deletableId = brandString<SessionId>('aras-deletable-session')
+    ctx.sessions.create(deletableId, { meta: { cwd: tempRoot } })
+
+    const deletedEvents: string[] = []
+    const unsubDel = bridge.subscribe((ev) => {
+      if (ev.type === 'session.deleted') deletedEvents.push(ev.sessionId)
+    })
+
+    const beforeDeleteList = (await (await fetch(`${baseUrl}/aras-api/sessions`)).json()) as {
+      sessions: Array<{ id: string }>
+    }
+    expect(beforeDeleteList.sessions.map(s => s.id)).toContain(String(deletableId))
+
+    const delRes = await fetch(`${baseUrl}/aras-api/sessions/${encodeURIComponent(String(deletableId))}`, {
+      method: 'DELETE',
+    })
+    expect(delRes.status).toBe(200)
+    expect(await delRes.json()).toMatchObject({ ok: true, deleted: true })
+    expect(deletedEvents).toContain(String(deletableId))
+
+    const afterDeleteList = (await (await fetch(`${baseUrl}/aras-api/sessions`)).json()) as {
+      sessions: Array<{ id: string }>
+    }
+    expect(afterDeleteList.sessions.map(s => s.id)).not.toContain(String(deletableId))
+
+    const missingDetailRes = await fetch(
+      `${baseUrl}/aras-api/sessions/${encodeURIComponent(String(deletableId))}`,
+    )
+    expect(missingDetailRes.status).toBe(404)
+
     unsub()
     unsubQ()
+    unsubDel()
   })
 })
